@@ -1,0 +1,22 @@
+[package]
+name = "vibe-timer"
+version = "0.1.0"
+edition = "2024"
+description = "Timer Windows ringan untuk melanjutkan sesi AI setelah usage limit reset"
+license = "MIT"
+
+[lib]
+name = "vibe_timer_core"
+path = "src/lib.rs"
+
+[[bin]]
+name = "VibeTimer"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+
