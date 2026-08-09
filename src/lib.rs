@@ -1,5 +1,7 @@
 //! Logika murni VibeTimer yang dapat diuji tanpa Windows UI.
 
+pub mod macro_engine;
+
 pub const MAX_HOURS: u32 = 99;
 pub const MAX_TOTAL_SECONDS: u64 = 99 * 3_600 + 59 * 60 + 59;
 

@@ -2,13 +2,19 @@
 
 use std::ffi::c_void;
 use std::mem::{size_of, zeroed};
+use std::path::PathBuf;
 use std::ptr::{null, null_mut};
+use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
 #[cfg(test)]
-use std::sync::atomic::{AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicIsize, AtomicUsize};
 
+use vibe_timer_core::macro_engine::{
+    MacroDefinition, MacroEvent, MacroLibrary, MacroMode, MacroTrigger, MouseButton,
+    default_data_path, load_library, save_library,
+};
 use vibe_timer_core::{DurationFields, format_duration};
 
 type Bool = i32;
@@ -19,6 +25,7 @@ type Hdc = isize;
 type Hgdiobj = isize;
 type Hicon = isize;
 type Hinstance = isize;
+type Hhook = isize;
 type Hmenu = isize;
 type Hwnd = isize;
 type Lparam = isize;
@@ -60,8 +67,18 @@ const WM_CTLCOLORSTATIC: Uint = 0x0138;
 const WM_MOUSEMOVE: Uint = 0x0200;
 const WM_LBUTTONUP: Uint = 0x0202;
 const WM_MOUSELEAVE: Uint = 0x02A3;
+const WM_KEYDOWN: Uint = 0x0100;
+const WM_KEYUP: Uint = 0x0101;
+const WM_SYSKEYDOWN: Uint = 0x0104;
+const WM_SYSKEYUP: Uint = 0x0105;
+const WM_MBUTTONDOWN: Uint = 0x0207;
+const WM_MBUTTONUP: Uint = 0x0208;
+const WM_MOUSEWHEEL: Uint = 0x020A;
+const WM_XBUTTONDOWN: Uint = 0x020B;
+const WM_XBUTTONUP: Uint = 0x020C;
 const WM_SETFONT: Uint = 0x0030;
 const WM_SETICON: Uint = 0x0080;
+const WM_APP_MACRO_DONE: Uint = 0x8001;
 
 const EM_SETMARGINS: Uint = 0x00D3;
 const EM_SETLIMITTEXT: Uint = 0x00C5;
@@ -83,6 +100,7 @@ const IDYES: i32 = 6;
 
 const DT_LEFT: Uint = 0x0000;
 const DT_CENTER: Uint = 0x0001;
+const DT_RIGHT: Uint = 0x0002;
 const DT_VCENTER: Uint = 0x0004;
 const DT_SINGLELINE: Uint = 0x0020;
 const DT_NOPREFIX: Uint = 0x0800;
@@ -94,9 +112,29 @@ const SRCCOPY: Dword = 0x00CC_0020;
 
 const TME_LEAVE: Dword = 0x0000_0002;
 const INPUT_KEYBOARD: Dword = 1;
+const INPUT_MOUSE: Dword = 0;
 const KEYEVENTF_KEYUP: Dword = 0x0002;
 const KEYEVENTF_UNICODE: Dword = 0x0004;
+const MOUSEEVENTF_LEFTDOWN: Dword = 0x0002;
+const MOUSEEVENTF_LEFTUP: Dword = 0x0004;
+const MOUSEEVENTF_RIGHTDOWN: Dword = 0x0008;
+const MOUSEEVENTF_RIGHTUP: Dword = 0x0010;
+const MOUSEEVENTF_MIDDLEDOWN: Dword = 0x0020;
+const MOUSEEVENTF_MIDDLEUP: Dword = 0x0040;
+const MOUSEEVENTF_WHEEL: Dword = 0x0800;
+const MOUSEEVENTF_XDOWN: Dword = 0x0080;
+const MOUSEEVENTF_XUP: Dword = 0x0100;
 const VK_RETURN: u16 = 0x0D;
+const VK_ESCAPE: u16 = 0x1B;
+const VK_F8: u16 = 0x77;
+const VK_F9: u16 = 0x78;
+const WH_KEYBOARD_LL: i32 = 13;
+const WH_MOUSE_LL: i32 = 14;
+const HC_ACTION: i32 = 0;
+const LLKHF_INJECTED: Dword = 0x10;
+const LLMHF_INJECTED: Dword = 0x01;
+const XBUTTON1: u16 = 1;
+const XBUTTON2: u16 = 2;
 #[cfg(test)]
 const ES_MULTILINE: Dword = 0x0004;
 #[cfg(test)]
@@ -119,7 +157,11 @@ const ICON_SMALL: Wparam = 0;
 const ICON_BIG: Wparam = 1;
 
 const CLIENT_WIDTH: i32 = 520;
+const MACRO_CLIENT_WIDTH: i32 = 960;
 const CLIENT_HEIGHT: i32 = 650;
+const MAX_RECORDED_EVENTS: usize = 10_000;
+const SWP_NOMOVE: Uint = 0x0002;
+const SWP_NOZORDER: Uint = 0x0004;
 
 const COLOR_BG: u32 = rgb(11, 15, 21);
 const COLOR_SURFACE: u32 = rgb(17, 24, 33);
@@ -138,6 +180,12 @@ const COLOR_ERROR: u32 = rgb(244, 91, 105);
 
 #[cfg(test)]
 static TEST_INPUT_TARGET: AtomicIsize = AtomicIsize::new(0);
+#[cfg(test)]
+static TEST_MACRO_INPUT_COUNT: AtomicUsize = AtomicUsize::new(0);
+static APP_STATE_POINTER: AtomicPtr<AppState> = AtomicPtr::new(null_mut());
+static MACRO_PLAYING: AtomicBool = AtomicBool::new(false);
+static MACRO_STOP: AtomicBool = AtomicBool::new(false);
+static TRIGGER_HELD: AtomicBool = AtomicBool::new(false);
 
 const fn rgb(red: u8, green: u8, blue: u8) -> u32 {
     red as u32 | ((green as u32) << 8) | ((blue as u32) << 16)
@@ -259,6 +307,24 @@ struct TrackMouseEvent {
 }
 
 #[repr(C)]
+struct KbdLlHookStruct {
+    vk_code: Dword,
+    scan_code: Dword,
+    flags: Dword,
+    time: Dword,
+    extra_info: usize,
+}
+
+#[repr(C)]
+struct MsLlHookStruct {
+    point: Point,
+    mouse_data: Dword,
+    flags: Dword,
+    time: Dword,
+    extra_info: usize,
+}
+
+#[repr(C)]
 #[derive(Clone, Copy)]
 struct KeyboardInput {
     virtual_key: u16,
@@ -338,6 +404,15 @@ unsafe extern "system" {
     fn SetCursor(cursor: Hcursor) -> Hcursor;
     fn ShowWindow(window: Hwnd, command: i32) -> Bool;
     fn UpdateWindow(window: Hwnd) -> Bool;
+    fn SetWindowPos(
+        window: Hwnd,
+        insert_after: Hwnd,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+        flags: Uint,
+    ) -> Bool;
     fn SetWindowLongPtrW(window: Hwnd, index: i32, value: isize) -> isize;
     fn GetWindowLongPtrW(window: Hwnd, index: i32) -> isize;
     fn GetClientRect(window: Hwnd, rect: *mut Rect) -> Bool;
@@ -367,6 +442,15 @@ unsafe extern "system" {
     fn TrackMouseEvent(event: *mut TrackMouseEvent) -> Bool;
     fn SetProcessDpiAwarenessContext(value: isize) -> Bool;
     fn SendInput(count: Uint, inputs: *const Input, input_size: i32) -> Uint;
+    fn PostMessageW(window: Hwnd, message: Uint, wparam: Wparam, lparam: Lparam) -> Bool;
+    fn SetWindowsHookExW(
+        hook_id: i32,
+        callback: Option<unsafe extern "system" fn(i32, Wparam, Lparam) -> Lresult>,
+        module: Hinstance,
+        thread_id: Dword,
+    ) -> Hhook;
+    fn UnhookWindowsHookEx(hook: Hhook) -> Bool;
+    fn CallNextHookEx(hook: Hhook, code: i32, wparam: Wparam, lparam: Lparam) -> Lresult;
     fn FillRect(dc: Hdc, rect: *const Rect, brush: Hbrush) -> i32;
     #[cfg(test)]
     fn SetFocus(window: Hwnd) -> Hwnd;
@@ -480,6 +564,19 @@ enum ActionMode {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AppTab {
+    Timer,
+    Macro,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MacroLane {
+    OnPress,
+    WhileHolding,
+    OnRelease,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum StatusKind {
     Ready,
     Running,
@@ -491,6 +588,8 @@ enum StatusKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum HitTarget {
     None,
+    TimerTab,
+    MacroTab,
     AddThirtyMinutes,
     AddOneHour,
     AddThreeHours,
@@ -498,6 +597,14 @@ enum HitTarget {
     EnterOnly,
     TextAndEnter,
     MainAction,
+    MacroNew,
+    MacroItem(usize),
+    MacroMode(MacroMode),
+    MacroTrigger(MacroTrigger),
+    MacroLane(MacroLane),
+    MacroRecord,
+    MacroClear,
+    MacroSave,
 }
 
 #[derive(Clone)]
@@ -518,10 +625,12 @@ struct Fonts {
 
 struct AppState {
     window: Hwnd,
+    tab: AppTab,
     hour_edit: Hwnd,
     minute_edit: Hwnd,
     second_edit: Hwnd,
     prompt_edit: Hwnd,
+    macro_name_edit: Hwnd,
     edit_brush: Hbrush,
     fonts: Fonts,
     action_mode: ActionMode,
@@ -536,16 +645,43 @@ struct AppState {
     armed_prompt: String,
     hot: HitTarget,
     tracking_mouse: bool,
+    macro_library: MacroLibrary,
+    macro_path: PathBuf,
+    macro_status_kind: StatusKind,
+    macro_status: String,
+    macro_dirty: bool,
+    macro_lane: MacroLane,
+    recording: bool,
+    record_last_event: Option<Instant>,
+    suppress_escape_until_up: bool,
+    trigger_down: bool,
+    keyboard_hook: Hhook,
+    mouse_hook: Hhook,
 }
 
 impl AppState {
     fn new() -> Self {
+        let macro_path = default_data_path();
+        let (macro_library, macro_status_kind, macro_status) = match load_library(&macro_path) {
+            Ok(library) => (
+                library,
+                StatusKind::Ready,
+                "Macro siap. Pilih pemicu lalu rekam langkah.".to_owned(),
+            ),
+            Err(error) => (
+                MacroLibrary::default(),
+                StatusKind::Warning,
+                format!("File macro tidak dapat dibaca: {error}"),
+            ),
+        };
         Self {
             window: 0,
+            tab: AppTab::Timer,
             hour_edit: 0,
             minute_edit: 0,
             second_edit: 0,
             prompt_edit: 0,
+            macro_name_edit: 0,
             edit_brush: 0,
             fonts: Fonts::default(),
             action_mode: ActionMode::TextAndEnter,
@@ -560,16 +696,40 @@ impl AppState {
             armed_prompt: String::new(),
             hot: HitTarget::None,
             tracking_mouse: false,
+            macro_library,
+            macro_path,
+            macro_status_kind,
+            macro_status,
+            macro_dirty: false,
+            macro_lane: MacroLane::OnPress,
+            recording: false,
+            record_last_event: None,
+            suppress_escape_until_up: false,
+            trigger_down: false,
+            keyboard_hook: 0,
+            mouse_hook: 0,
         }
     }
 
     unsafe fn set_controls_visible(&self, visible: bool) {
-        let command = if visible { SW_SHOWNORMAL } else { SW_HIDE };
+        let timer_command = if visible && self.tab == AppTab::Timer {
+            SW_SHOWNORMAL
+        } else {
+            SW_HIDE
+        };
         unsafe {
-            ShowWindow(self.hour_edit, command);
-            ShowWindow(self.minute_edit, command);
-            ShowWindow(self.second_edit, command);
-            ShowWindow(self.prompt_edit, command);
+            ShowWindow(self.hour_edit, timer_command);
+            ShowWindow(self.minute_edit, timer_command);
+            ShowWindow(self.second_edit, timer_command);
+            ShowWindow(self.prompt_edit, timer_command);
+            ShowWindow(
+                self.macro_name_edit,
+                if self.tab == AppTab::Macro && !self.recording {
+                    SW_SHOWNORMAL
+                } else {
+                    SW_HIDE
+                },
+            );
         }
     }
 
@@ -577,6 +737,10 @@ impl AppState {
         let enabled = self.action_mode == ActionMode::TextAndEnter && !self.running;
         unsafe {
             EnableWindow(self.prompt_edit, if enabled { TRUE } else { FALSE });
+            EnableWindow(
+                self.macro_name_edit,
+                if !self.recording { TRUE } else { FALSE },
+            );
         }
     }
 
@@ -596,6 +760,14 @@ impl AppState {
             if self.edit_brush != 0 {
                 DeleteObject(self.edit_brush);
             }
+            if self.keyboard_hook != 0 {
+                UnhookWindowsHookEx(self.keyboard_hook);
+                self.keyboard_hook = 0;
+            }
+            if self.mouse_hook != 0 {
+                UnhookWindowsHookEx(self.mouse_hook);
+                self.mouse_hook = 0;
+            }
         }
     }
 }
@@ -607,6 +779,29 @@ const RECT_PICK_TARGET: Rect = Rect::new(358, 309, 474, 351);
 const RECT_MODE_ENTER: Rect = Rect::new(42, 424, 249, 462);
 const RECT_MODE_TEXT: Rect = Rect::new(251, 424, 458, 462);
 const RECT_MAIN_ACTION: Rect = Rect::new(24, 548, 496, 604);
+const RECT_TAB_TIMER: Rect = Rect::new(300, 24, 382, 54);
+const RECT_TAB_MACRO: Rect = Rect::new(386, 24, 482, 54);
+const RECT_MACRO_NEW: Rect = Rect::new(42, 117, 218, 157);
+const RECT_MACRO_MODE_NO_REPEAT: Rect = Rect::new(278, 173, 428, 239);
+const RECT_MACRO_MODE_HOLD: Rect = Rect::new(438, 173, 588, 239);
+const RECT_MACRO_MODE_TOGGLE: Rect = Rect::new(598, 173, 748, 239);
+const RECT_MACRO_MODE_SEQUENCE: Rect = Rect::new(758, 173, 908, 239);
+const RECT_MACRO_LANE_PRESS: Rect = Rect::new(278, 331, 412, 365);
+const RECT_MACRO_LANE_HOLD: Rect = Rect::new(420, 331, 570, 365);
+const RECT_MACRO_LANE_RELEASE: Rect = Rect::new(578, 331, 722, 365);
+const RECT_MACRO_RECORD: Rect = Rect::new(278, 548, 474, 596);
+const RECT_MACRO_CLEAR: Rect = Rect::new(484, 548, 634, 596);
+const RECT_MACRO_SAVE: Rect = Rect::new(758, 548, 912, 596);
+
+fn macro_trigger_rect(index: usize) -> Rect {
+    let left = 278 + index as i32 * 116;
+    Rect::new(left, 272, left + 106, 310)
+}
+
+fn macro_item_rect(index: usize) -> Rect {
+    let top = 169 + index as i32 * 58;
+    Rect::new(42, top, 218, top + 48)
+}
 
 fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
@@ -620,11 +815,61 @@ fn high_word(value: Lparam) -> i32 {
     ((value as u32 >> 16) & 0xFFFF) as i16 as i32
 }
 
-fn hit_test(x: i32, y: i32, running: bool) -> HitTarget {
+fn hit_test(x: i32, y: i32, state: &AppState) -> HitTarget {
+    if RECT_TAB_TIMER.contains(x, y) {
+        return HitTarget::TimerTab;
+    }
+    if RECT_TAB_MACRO.contains(x, y) {
+        return HitTarget::MacroTab;
+    }
+    if state.tab == AppTab::Macro {
+        if RECT_MACRO_NEW.contains(x, y) {
+            return HitTarget::MacroNew;
+        }
+        for (index, _) in state.macro_library.macros.iter().take(7).enumerate() {
+            if macro_item_rect(index).contains(x, y) {
+                return HitTarget::MacroItem(index);
+            }
+        }
+        for (target, rect) in [
+            (MacroMode::NoRepeat, RECT_MACRO_MODE_NO_REPEAT),
+            (MacroMode::RepeatWhileHolding, RECT_MACRO_MODE_HOLD),
+            (MacroMode::Toggle, RECT_MACRO_MODE_TOGGLE),
+            (MacroMode::Sequence, RECT_MACRO_MODE_SEQUENCE),
+        ] {
+            if rect.contains(x, y) {
+                return HitTarget::MacroMode(target);
+            }
+        }
+        for (index, trigger) in MacroTrigger::ALL.into_iter().enumerate() {
+            if macro_trigger_rect(index).contains(x, y) {
+                return HitTarget::MacroTrigger(trigger);
+            }
+        }
+        for (lane, rect) in [
+            (MacroLane::OnPress, RECT_MACRO_LANE_PRESS),
+            (MacroLane::WhileHolding, RECT_MACRO_LANE_HOLD),
+            (MacroLane::OnRelease, RECT_MACRO_LANE_RELEASE),
+        ] {
+            if rect.contains(x, y) {
+                return HitTarget::MacroLane(lane);
+            }
+        }
+        if RECT_MACRO_RECORD.contains(x, y) {
+            return HitTarget::MacroRecord;
+        }
+        if RECT_MACRO_CLEAR.contains(x, y) {
+            return HitTarget::MacroClear;
+        }
+        if RECT_MACRO_SAVE.contains(x, y) {
+            return HitTarget::MacroSave;
+        }
+        return HitTarget::None;
+    }
     if RECT_MAIN_ACTION.contains(x, y) {
         return HitTarget::MainAction;
     }
-    if running {
+    if state.running {
         return HitTarget::None;
     }
     if RECT_QUICK_30.contains(x, y) {
@@ -831,14 +1076,20 @@ unsafe fn draw_clock_mark(dc: Hdc) {
 }
 
 unsafe fn draw_status_pill(dc: Hdc, state: &AppState) {
-    let (label, dot_color, width) = match state.status_kind {
+    let kind = if state.tab == AppTab::Macro {
+        state.macro_status_kind
+    } else {
+        state.status_kind
+    };
+    let (label, dot_color, width) = match kind {
         StatusKind::Ready => ("SIAP", COLOR_MUTED, 74),
         StatusKind::Running => ("AKTIF", COLOR_ACCENT, 82),
         StatusKind::Sent => ("TERKIRIM", COLOR_SUCCESS, 104),
         StatusKind::Warning => ("PERHATIAN", COLOR_WARNING, 118),
         StatusKind::Error => ("GAGAL", COLOR_ERROR, 82),
     };
-    let rect = Rect::new(496 - width, 26, 496, 50);
+    let right = if state.tab == AppTab::Macro { 936 } else { 496 };
+    let rect = Rect::new(right - width, 26, right, 50);
     unsafe {
         rounded_box(dc, rect, 12, COLOR_SURFACE_2, COLOR_BORDER);
         let dot = Rect::new(rect.left + 10, 35, rect.left + 16, 41);
@@ -854,7 +1105,474 @@ unsafe fn draw_status_pill(dc: Hdc, state: &AppState) {
     }
 }
 
+unsafe fn draw_tabs(dc: Hdc, state: &AppState) {
+    unsafe {
+        draw_button(
+            dc,
+            RECT_TAB_TIMER,
+            "Timer",
+            state.tab == AppTab::Timer,
+            state.hot == HitTarget::TimerTab,
+            state.fonts.small,
+        );
+        draw_button(
+            dc,
+            RECT_TAB_MACRO,
+            "Macro",
+            state.tab == AppTab::Macro,
+            state.hot == HitTarget::MacroTab,
+            state.fonts.small,
+        );
+    }
+}
+
+fn key_label(key: u16) -> String {
+    match key {
+        0x08 => "Backspace".to_owned(),
+        0x09 => "Tab".to_owned(),
+        0x0D => "Enter".to_owned(),
+        0x10 => "Shift".to_owned(),
+        0x11 => "Ctrl".to_owned(),
+        0x12 => "Alt".to_owned(),
+        0x1B => "Esc".to_owned(),
+        0x20 => "Space".to_owned(),
+        0x25 => "Left".to_owned(),
+        0x26 => "Up".to_owned(),
+        0x27 => "Right".to_owned(),
+        0x28 => "Down".to_owned(),
+        0x2E => "Delete".to_owned(),
+        VK_F8 => "F8".to_owned(),
+        VK_F9 => "F9".to_owned(),
+        value if (0x30..=0x5A).contains(&value) => {
+            char::from_u32(value as u32).unwrap_or('?').to_string()
+        }
+        value if (0x70..=0x87).contains(&value) => format!("F{}", value - 0x6F),
+        value => format!("VK {value:02X}"),
+    }
+}
+
+fn mouse_label(button: MouseButton) -> &'static str {
+    match button {
+        MouseButton::Left => "Left",
+        MouseButton::Right => "Right",
+        MouseButton::Middle => "Middle",
+        MouseButton::X1 => "Mouse 4",
+        MouseButton::X2 => "Mouse 5",
+    }
+}
+
+fn macro_event_label(event: &MacroEvent) -> String {
+    match event {
+        MacroEvent::Delay(ms) => format!("{ms} ms"),
+        MacroEvent::KeyDown(key) => format!("{} ↓", key_label(*key)),
+        MacroEvent::KeyUp(key) => format!("{} ↑", key_label(*key)),
+        MacroEvent::MouseDown(button) => format!("{} ↓", mouse_label(*button)),
+        MacroEvent::MouseUp(button) => format!("{} ↑", mouse_label(*button)),
+        MacroEvent::Wheel(delta) if *delta > 0 => "Wheel ↑".to_owned(),
+        MacroEvent::Wheel(_) => "Wheel ↓".to_owned(),
+    }
+}
+
+fn lane_events(item: &MacroDefinition, lane: MacroLane) -> &[MacroEvent] {
+    match lane {
+        MacroLane::OnPress => &item.on_press,
+        MacroLane::WhileHolding => &item.while_holding,
+        MacroLane::OnRelease => &item.on_release,
+    }
+}
+
+fn total_delay(events: &[MacroEvent]) -> u64 {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            MacroEvent::Delay(value) => Some(*value as u64),
+            _ => None,
+        })
+        .sum()
+}
+
+unsafe fn draw_macro_interface(dc: Hdc, state: &AppState) {
+    unsafe {
+        fill_rect_color(
+            dc,
+            Rect::new(0, 0, MACRO_CLIENT_WIDTH, CLIENT_HEIGHT),
+            COLOR_BG,
+        );
+        draw_clock_mark(dc);
+        draw_label(
+            dc,
+            "VibeTimer",
+            Rect::new(62, 20, 260, 48),
+            COLOR_TEXT,
+            state.fonts.title,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
+        draw_label(
+            dc,
+            "Macro Studio • bekerja untuk mouse HID umum",
+            Rect::new(63, 47, 290, 67),
+            COLOR_MUTED,
+            state.fonts.small,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+        );
+        draw_tabs(dc, state);
+        draw_status_pill(dc, state);
+
+        rounded_box(
+            dc,
+            Rect::new(24, 84, 236, 608),
+            18,
+            COLOR_SURFACE,
+            COLOR_BORDER,
+        );
+        draw_label(
+            dc,
+            "MACROS",
+            Rect::new(42, 94, 218, 116),
+            COLOR_MUTED,
+            state.fonts.small,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
+        draw_button(
+            dc,
+            RECT_MACRO_NEW,
+            "+ Buat macro baru",
+            false,
+            state.hot == HitTarget::MacroNew,
+            state.fonts.small,
+        );
+        for (index, item) in state.macro_library.macros.iter().take(7).enumerate() {
+            let rect = macro_item_rect(index);
+            let selected = item.id == state.macro_library.selected_id;
+            rounded_box(
+                dc,
+                rect,
+                12,
+                if selected {
+                    COLOR_ACCENT_DARK
+                } else {
+                    COLOR_SURFACE_2
+                },
+                if selected { COLOR_ACCENT } else { COLOR_BORDER },
+            );
+            filled_circle(
+                dc,
+                Rect::new(rect.left + 12, rect.top + 13, rect.left + 20, rect.top + 21),
+                if selected { COLOR_ACCENT } else { COLOR_DIM },
+            );
+            draw_label(
+                dc,
+                &item.name,
+                Rect::new(rect.left + 28, rect.top + 5, rect.right - 8, rect.top + 27),
+                if selected { COLOR_TEXT } else { COLOR_MUTED },
+                state.fonts.semibold,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+            );
+            draw_label(
+                dc,
+                item.trigger.label(),
+                Rect::new(
+                    rect.left + 28,
+                    rect.top + 25,
+                    rect.right - 8,
+                    rect.bottom - 3,
+                ),
+                COLOR_DIM,
+                state.fonts.small,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+            );
+        }
+
+        rounded_box(
+            dc,
+            Rect::new(252, 84, 936, 608),
+            18,
+            COLOR_SURFACE,
+            COLOR_BORDER,
+        );
+        draw_label(
+            dc,
+            if state.recording {
+                "RECORDING"
+            } else {
+                "MACRO EDITOR"
+            },
+            Rect::new(278, 95, 470, 119),
+            if state.recording {
+                COLOR_ERROR
+            } else {
+                COLOR_MUTED
+            },
+            state.fonts.small,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
+        if state.recording {
+            draw_label(
+                dc,
+                "Semua input ditangkap • Esc untuk selesai",
+                Rect::new(584, 95, 910, 119),
+                COLOR_ERROR,
+                state.fonts.small,
+                DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
+            );
+        }
+
+        let Some(item) = state.macro_library.selected() else {
+            return;
+        };
+        rounded_box(
+            dc,
+            Rect::new(270, 121, 916, 162),
+            12,
+            COLOR_SURFACE_2,
+            COLOR_BORDER,
+        );
+
+        draw_label(
+            dc,
+            "TIPE MACRO",
+            Rect::new(278, 151, 560, 177),
+            COLOR_MUTED,
+            state.fonts.small,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
+        for (mode, rect, hint) in [
+            (
+                MacroMode::NoRepeat,
+                RECT_MACRO_MODE_NO_REPEAT,
+                "Jalankan sekali",
+            ),
+            (
+                MacroMode::RepeatWhileHolding,
+                RECT_MACRO_MODE_HOLD,
+                "Ulang saat ditahan",
+            ),
+            (
+                MacroMode::Toggle,
+                RECT_MACRO_MODE_TOGGLE,
+                "Klik hidup / mati",
+            ),
+            (
+                MacroMode::Sequence,
+                RECT_MACRO_MODE_SEQUENCE,
+                "Press • hold • release",
+            ),
+        ] {
+            let selected = item.mode == mode;
+            rounded_box(
+                dc,
+                rect,
+                14,
+                if selected {
+                    COLOR_ACCENT_DARK
+                } else {
+                    COLOR_SURFACE_2
+                },
+                if selected {
+                    COLOR_ACCENT
+                } else if state.hot == HitTarget::MacroMode(mode) {
+                    COLOR_BORDER_HOT
+                } else {
+                    COLOR_BORDER
+                },
+            );
+            draw_label(
+                dc,
+                mode.label(),
+                Rect::new(rect.left + 10, rect.top + 7, rect.right - 10, rect.top + 33),
+                if selected { COLOR_TEXT } else { COLOR_MUTED },
+                state.fonts.semibold,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+            );
+            draw_label(
+                dc,
+                hint,
+                Rect::new(
+                    rect.left + 7,
+                    rect.top + 34,
+                    rect.right - 7,
+                    rect.bottom - 6,
+                ),
+                COLOR_DIM,
+                state.fonts.small,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+            );
+        }
+
+        draw_label(
+            dc,
+            "PEMICU GLOBAL",
+            Rect::new(278, 245, 500, 269),
+            COLOR_MUTED,
+            state.fonts.small,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
+        for (index, trigger) in MacroTrigger::ALL.into_iter().enumerate() {
+            draw_button(
+                dc,
+                macro_trigger_rect(index),
+                trigger.label(),
+                item.trigger == trigger,
+                state.hot == HitTarget::MacroTrigger(trigger),
+                state.fonts.small,
+            );
+        }
+
+        draw_label(
+            dc,
+            "TIMELINE",
+            Rect::new(278, 310, 500, 334),
+            COLOR_MUTED,
+            state.fonts.small,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
+        for (lane, rect, label) in [
+            (MacroLane::OnPress, RECT_MACRO_LANE_PRESS, "On Press"),
+            (
+                MacroLane::WhileHolding,
+                RECT_MACRO_LANE_HOLD,
+                "While Holding",
+            ),
+            (MacroLane::OnRelease, RECT_MACRO_LANE_RELEASE, "On Release"),
+        ] {
+            draw_button(
+                dc,
+                rect,
+                label,
+                state.macro_lane == lane,
+                state.hot == HitTarget::MacroLane(lane),
+                state.fonts.small,
+            );
+        }
+        let events = lane_events(item, state.macro_lane);
+        draw_label(
+            dc,
+            &format!("{} langkah • {} ms", events.len(), total_delay(events)),
+            Rect::new(735, 331, 908, 365),
+            COLOR_DIM,
+            state.fonts.small,
+            DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
+        );
+        rounded_box(
+            dc,
+            Rect::new(278, 375, 912, 532),
+            14,
+            COLOR_SURFACE_2,
+            COLOR_BORDER,
+        );
+        if events.is_empty() {
+            draw_label(
+                dc,
+                "Timeline kosong — tekan Rekam lalu lakukan kombinasi tombol atau klik mouse.",
+                Rect::new(300, 405, 890, 487),
+                COLOR_DIM,
+                state.fonts.body,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+            );
+        } else {
+            for (index, event) in events.iter().take(18).enumerate() {
+                let column = index % 6;
+                let row = index / 6;
+                let left = 292 + column as i32 * 100;
+                let top = 390 + row as i32 * 40;
+                let is_delay = matches!(event, MacroEvent::Delay(_));
+                rounded_box(
+                    dc,
+                    Rect::new(left, top, left + 90, top + 30),
+                    10,
+                    if is_delay {
+                        rgb(45, 38, 62)
+                    } else {
+                        rgb(27, 38, 51)
+                    },
+                    if is_delay {
+                        COLOR_BORDER_HOT
+                    } else {
+                        COLOR_BORDER
+                    },
+                );
+                draw_label(
+                    dc,
+                    &macro_event_label(event),
+                    Rect::new(left + 5, top, left + 85, top + 30),
+                    if is_delay {
+                        rgb(196, 173, 255)
+                    } else {
+                        COLOR_TEXT
+                    },
+                    state.fonts.small,
+                    DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                );
+            }
+            if events.len() > 18 {
+                draw_label(
+                    dc,
+                    &format!("+{} langkah lainnya", events.len() - 18),
+                    Rect::new(760, 495, 896, 520),
+                    COLOR_DIM,
+                    state.fonts.small,
+                    DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
+                );
+            }
+        }
+
+        draw_button(
+            dc,
+            RECT_MACRO_RECORD,
+            if state.recording {
+                "Stop recording"
+            } else {
+                "●  Rekam input"
+            },
+            state.recording,
+            state.hot == HitTarget::MacroRecord,
+            state.fonts.semibold,
+        );
+        draw_button(
+            dc,
+            RECT_MACRO_CLEAR,
+            "Bersihkan lane",
+            false,
+            state.hot == HitTarget::MacroClear,
+            state.fonts.small,
+        );
+        draw_button(
+            dc,
+            RECT_MACRO_SAVE,
+            if state.macro_dirty {
+                "Simpan *"
+            } else {
+                "Tersimpan"
+            },
+            true,
+            state.hot == HitTarget::MacroSave,
+            state.fonts.semibold,
+        );
+
+        let status_color = match state.macro_status_kind {
+            StatusKind::Ready => COLOR_MUTED,
+            StatusKind::Running => COLOR_ACCENT,
+            StatusKind::Sent => COLOR_SUCCESS,
+            StatusKind::Warning => COLOR_WARNING,
+            StatusKind::Error => COLOR_ERROR,
+        };
+        filled_circle(dc, Rect::new(260, 622, 268, 630), status_color);
+        draw_label(
+            dc,
+            &state.macro_status,
+            Rect::new(278, 612, 930, 640),
+            COLOR_MUTED,
+            state.fonts.small,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+        );
+    }
+}
+
 unsafe fn draw_interface(dc: Hdc, state: &AppState) {
+    if state.tab == AppTab::Macro {
+        unsafe { draw_macro_interface(dc, state) };
+        return;
+    }
     unsafe {
         fill_rect_color(dc, Rect::new(0, 0, CLIENT_WIDTH, CLIENT_HEIGHT), COLOR_BG);
 
@@ -875,7 +1593,7 @@ unsafe fn draw_interface(dc: Hdc, state: &AppState) {
             state.fonts.small,
             DT_LEFT | DT_VCENTER | DT_SINGLELINE,
         );
-        draw_status_pill(dc, state);
+        draw_tabs(dc, state);
 
         let time_card = Rect::new(24, 84, 496, 274);
         rounded_box(dc, time_card, 18, COLOR_SURFACE, COLOR_BORDER);
@@ -1211,6 +1929,22 @@ unsafe fn initialize_controls(state: &mut AppState, instance: Hinstance) {
                 style: 0,
             },
         );
+        let initial_macro_name = state
+            .macro_library
+            .selected()
+            .map(|item| item.name.clone())
+            .unwrap_or_else(|| "Macro".to_owned());
+        state.macro_name_edit = create_edit(
+            state.window,
+            instance,
+            EditSpec {
+                id: 105,
+                text: &initial_macro_name,
+                bounds: Rect::new(282, 130, 904, 154),
+                style: 0,
+            },
+        );
+        ShowWindow(state.macro_name_edit, SW_HIDE);
 
         for edit in [state.hour_edit, state.minute_edit, state.second_edit] {
             SendMessageW(
@@ -1245,6 +1979,20 @@ unsafe fn initialize_controls(state: &mut AppState, instance: Hinstance) {
         );
         let dark = wide("DarkMode_CFD");
         SetWindowTheme(state.prompt_edit, dark.as_ptr(), null());
+        SendMessageW(
+            state.macro_name_edit,
+            WM_SETFONT,
+            state.fonts.semibold as Wparam,
+            TRUE as Lparam,
+        );
+        SendMessageW(state.macro_name_edit, EM_SETLIMITTEXT, 80, 0);
+        SendMessageW(
+            state.macro_name_edit,
+            EM_SETMARGINS,
+            EC_LEFTMARGIN | EC_RIGHTMARGIN,
+            (8 | (8 << 16)) as Lparam,
+        );
+        SetWindowTheme(state.macro_name_edit, dark.as_ptr(), null());
     }
 }
 
@@ -1426,6 +2174,51 @@ fn keyboard_input(virtual_key: u16, scan_code: u16, flags: Dword) -> Input {
     }
 }
 
+fn mouse_input(mouse_data: Dword, flags: Dword) -> Input {
+    Input {
+        kind: INPUT_MOUSE,
+        data: InputData {
+            mouse: MouseInput {
+                dx: 0,
+                dy: 0,
+                mouse_data,
+                flags,
+                time: 0,
+                extra_info: 0,
+            },
+        },
+    }
+}
+
+fn macro_event_input(event: &MacroEvent) -> Option<Input> {
+    match *event {
+        MacroEvent::Delay(_) => None,
+        MacroEvent::KeyDown(key) => Some(keyboard_input(key, 0, 0)),
+        MacroEvent::KeyUp(key) => Some(keyboard_input(key, 0, KEYEVENTF_KEYUP)),
+        MacroEvent::MouseDown(button) => {
+            let (data, flags) = match button {
+                MouseButton::Left => (0, MOUSEEVENTF_LEFTDOWN),
+                MouseButton::Right => (0, MOUSEEVENTF_RIGHTDOWN),
+                MouseButton::Middle => (0, MOUSEEVENTF_MIDDLEDOWN),
+                MouseButton::X1 => (XBUTTON1 as Dword, MOUSEEVENTF_XDOWN),
+                MouseButton::X2 => (XBUTTON2 as Dword, MOUSEEVENTF_XDOWN),
+            };
+            Some(mouse_input(data, flags))
+        }
+        MacroEvent::MouseUp(button) => {
+            let (data, flags) = match button {
+                MouseButton::Left => (0, MOUSEEVENTF_LEFTUP),
+                MouseButton::Right => (0, MOUSEEVENTF_RIGHTUP),
+                MouseButton::Middle => (0, MOUSEEVENTF_MIDDLEUP),
+                MouseButton::X1 => (XBUTTON1 as Dword, MOUSEEVENTF_XUP),
+                MouseButton::X2 => (XBUTTON2 as Dword, MOUSEEVENTF_XUP),
+            };
+            Some(mouse_input(data, flags))
+        }
+        MacroEvent::Wheel(delta) => Some(mouse_input(delta as i32 as Dword, MOUSEEVENTF_WHEEL)),
+    }
+}
+
 unsafe fn submit_inputs(inputs: &[Input]) -> Result<(), String> {
     if inputs.is_empty() {
         return Ok(());
@@ -1445,6 +2238,9 @@ unsafe fn submit_inputs(inputs: &[Input]) -> Result<(), String> {
             let target = TEST_INPUT_TARGET.load(Ordering::Relaxed);
             if target != 0 {
                 for input in inputs {
+                    if input.kind != INPUT_KEYBOARD {
+                        continue;
+                    }
                     let keyboard = unsafe { input.data.keyboard };
                     if keyboard.flags & KEYEVENTF_KEYUP != 0 {
                         continue;
@@ -1694,9 +2490,468 @@ unsafe fn update_countdown(state: &mut AppState) {
     }
 }
 
+unsafe fn resize_for_tab(state: &AppState) {
+    let client_width = if state.tab == AppTab::Macro {
+        MACRO_CLIENT_WIDTH
+    } else {
+        CLIENT_WIDTH
+    };
+    let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+    let mut outer = Rect::new(0, 0, client_width, CLIENT_HEIGHT);
+    unsafe {
+        AdjustWindowRectEx(&mut outer, style, FALSE, 0);
+        SetWindowPos(
+            state.window,
+            0,
+            0,
+            0,
+            outer.right - outer.left,
+            outer.bottom - outer.top,
+            SWP_NOMOVE | SWP_NOZORDER,
+        );
+    }
+}
+
+unsafe fn sync_macro_name_edit(state: &AppState) {
+    let name = state
+        .macro_library
+        .selected()
+        .map(|item| item.name.as_str())
+        .unwrap_or("Macro");
+    unsafe { SetWindowTextW(state.macro_name_edit, wide(name).as_ptr()) };
+}
+
+unsafe fn switch_tab(state: &mut AppState, tab: AppTab) {
+    if state.tab == tab {
+        return;
+    }
+    if state.recording {
+        unsafe { stop_macro_recording(state) };
+    }
+    state.tab = tab;
+    state.hot = HitTarget::None;
+    unsafe {
+        resize_for_tab(state);
+        state.set_controls_visible(!state.running);
+        state.set_prompt_enabled();
+        InvalidateRect(state.window, null(), FALSE);
+    }
+}
+
+fn selected_lane_mut(state: &mut AppState) -> Option<&mut Vec<MacroEvent>> {
+    let lane = state.macro_lane;
+    let item = state.macro_library.selected_mut()?;
+    Some(match lane {
+        MacroLane::OnPress => &mut item.on_press,
+        MacroLane::WhileHolding => &mut item.while_holding,
+        MacroLane::OnRelease => &mut item.on_release,
+    })
+}
+
+unsafe fn save_current_macro(state: &mut AppState) {
+    let name = unsafe { get_window_text(state.macro_name_edit) };
+    if name.trim().is_empty() {
+        state.macro_status_kind = StatusKind::Error;
+        state.macro_status = "Nama macro tidak boleh kosong.".to_owned();
+        unsafe { InvalidateRect(state.window, null(), FALSE) };
+        return;
+    }
+    if let Some(item) = state.macro_library.selected_mut() {
+        item.name = name.trim().to_owned();
+    }
+    match save_library(&state.macro_path, &state.macro_library) {
+        Ok(()) => {
+            state.macro_dirty = false;
+            state.macro_status_kind = StatusKind::Sent;
+            state.macro_status = format!(
+                "Macro tersimpan • pemicu {} aktif global.",
+                state
+                    .macro_library
+                    .selected()
+                    .map(|item| item.trigger.label())
+                    .unwrap_or("-")
+            );
+        }
+        Err(error) => {
+            state.macro_status_kind = StatusKind::Error;
+            state.macro_status = format!("Gagal menyimpan macro: {error}");
+        }
+    }
+    unsafe { InvalidateRect(state.window, null(), FALSE) };
+}
+
+unsafe fn start_macro_recording(state: &mut AppState) {
+    if state.recording || state.macro_library.selected().is_none() {
+        return;
+    }
+    MACRO_STOP.store(true, Ordering::Release);
+    state.recording = true;
+    state.record_last_event = Some(Instant::now());
+    state.macro_status_kind = StatusKind::Running;
+    state.macro_status = "Merekam input global. Tekan Esc untuk selesai.".to_owned();
+    unsafe {
+        state.set_controls_visible(true);
+        state.set_prompt_enabled();
+        InvalidateRect(state.window, null(), FALSE);
+    }
+}
+
+unsafe fn stop_macro_recording(state: &mut AppState) {
+    if !state.recording {
+        return;
+    }
+    state.recording = false;
+    state.record_last_event = None;
+    state.macro_dirty = true;
+    let count = state
+        .macro_library
+        .selected()
+        .map(|item| lane_events(item, state.macro_lane).len())
+        .unwrap_or(0);
+    state.macro_status_kind = StatusKind::Ready;
+    state.macro_status = format!("Recording selesai • {count} langkah di timeline.");
+    unsafe {
+        state.set_controls_visible(true);
+        state.set_prompt_enabled();
+        InvalidateRect(state.window, null(), FALSE);
+    }
+}
+
+unsafe fn record_macro_event(state: &mut AppState, event: MacroEvent) {
+    let now = Instant::now();
+    let elapsed = state
+        .record_last_event
+        .map(|last| now.saturating_duration_since(last).as_millis().min(60_000) as u32)
+        .unwrap_or(0);
+    let mut limit_reached = false;
+    if let Some(events) = selected_lane_mut(state) {
+        if events.len().saturating_add(2) > MAX_RECORDED_EVENTS {
+            limit_reached = true;
+        } else {
+            if elapsed > 0 {
+                events.push(MacroEvent::Delay(elapsed));
+            }
+            events.push(event);
+        }
+    }
+    if limit_reached {
+        unsafe { stop_macro_recording(state) };
+        state.macro_status_kind = StatusKind::Error;
+        state.macro_status = "Recording dihentikan pada batas aman 10.000 langkah.".to_owned();
+    } else {
+        state.record_last_event = Some(now);
+    }
+    state.macro_dirty = true;
+    unsafe { InvalidateRect(state.window, null(), FALSE) };
+}
+
+fn sleep_interruptible(milliseconds: u32) -> bool {
+    let mut remaining = milliseconds;
+    while remaining > 0 {
+        if MACRO_STOP.load(Ordering::Acquire) {
+            return false;
+        }
+        let slice = remaining.min(10);
+        thread::sleep(Duration::from_millis(slice as u64));
+        remaining -= slice;
+    }
+    true
+}
+
+fn play_macro_events(events: &[MacroEvent], standard_delay: Option<u32>) -> Result<bool, String> {
+    for event in events {
+        if MACRO_STOP.load(Ordering::Acquire) {
+            return Ok(false);
+        }
+        if let MacroEvent::Delay(recorded) = event {
+            if !sleep_interruptible(standard_delay.unwrap_or(*recorded)) {
+                return Ok(false);
+            }
+            continue;
+        }
+        if let Some(input) = macro_event_input(event) {
+            #[cfg(test)]
+            TEST_MACRO_INPUT_COUNT.fetch_add(1, Ordering::Relaxed);
+            unsafe { submit_inputs(&[input])? };
+        }
+    }
+    Ok(true)
+}
+
+fn post_macro_result(window: Hwnd, result: Result<(), String>) {
+    MACRO_PLAYING.store(false, Ordering::Release);
+    MACRO_STOP.store(false, Ordering::Release);
+    unsafe {
+        PostMessageW(window, WM_APP_MACRO_DONE, usize::from(result.is_ok()), 0);
+    }
+}
+
+fn launch_macro_playback(window: Hwnd, item: MacroDefinition) {
+    if item.on_press.is_empty() && item.while_holding.is_empty() && item.on_release.is_empty() {
+        unsafe { PostMessageW(window, WM_APP_MACRO_DONE, 0, 0) };
+        return;
+    }
+
+    if item.mode == MacroMode::Toggle && MACRO_PLAYING.load(Ordering::Acquire) {
+        MACRO_STOP.store(true, Ordering::Release);
+        return;
+    }
+    if MACRO_PLAYING
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+    MACRO_STOP.store(false, Ordering::Release);
+    thread::spawn(move || {
+        let standard = item.standard_delay_ms;
+        let result = (|| -> Result<(), String> {
+            match item.mode {
+                MacroMode::NoRepeat => {
+                    play_macro_events(&item.on_press, standard)?;
+                }
+                MacroMode::RepeatWhileHolding => {
+                    while TRIGGER_HELD.load(Ordering::Acquire)
+                        && !MACRO_STOP.load(Ordering::Acquire)
+                    {
+                        if !play_macro_events(&item.on_press, standard)? {
+                            break;
+                        }
+                        if item.on_press.is_empty() && !sleep_interruptible(10) {
+                            break;
+                        }
+                    }
+                }
+                MacroMode::Toggle => {
+                    while !MACRO_STOP.load(Ordering::Acquire) {
+                        if !play_macro_events(&item.on_press, standard)? {
+                            break;
+                        }
+                        if item.on_press.is_empty() && !sleep_interruptible(10) {
+                            break;
+                        }
+                    }
+                }
+                MacroMode::Sequence => {
+                    if play_macro_events(&item.on_press, standard)? {
+                        while TRIGGER_HELD.load(Ordering::Acquire)
+                            && !MACRO_STOP.load(Ordering::Acquire)
+                        {
+                            if !play_macro_events(&item.while_holding, standard)? {
+                                break;
+                            }
+                            if item.while_holding.is_empty() && !sleep_interruptible(10) {
+                                break;
+                            }
+                        }
+                        if !MACRO_STOP.load(Ordering::Acquire) {
+                            play_macro_events(&item.on_release, standard)?;
+                        }
+                    }
+                }
+            }
+            Ok(())
+        })();
+        post_macro_result(window, result);
+    });
+}
+
+fn keyboard_trigger_matches(trigger: MacroTrigger, key: u16) -> bool {
+    matches!(
+        (trigger, key),
+        (MacroTrigger::F8, VK_F8) | (MacroTrigger::F9, VK_F9)
+    )
+}
+
+fn mouse_trigger_matches(trigger: MacroTrigger, message: Uint, mouse_data: Dword) -> bool {
+    match trigger {
+        MacroTrigger::MouseMiddle => matches!(message, WM_MBUTTONDOWN | WM_MBUTTONUP),
+        MacroTrigger::MouseX1 => {
+            matches!(message, WM_XBUTTONDOWN | WM_XBUTTONUP)
+                && ((mouse_data >> 16) as u16 == XBUTTON1)
+        }
+        MacroTrigger::MouseX2 => {
+            matches!(message, WM_XBUTTONDOWN | WM_XBUTTONUP)
+                && ((mouse_data >> 16) as u16 == XBUTTON2)
+        }
+        _ => false,
+    }
+}
+
+fn macro_for_keyboard_trigger(state: &AppState, key: u16) -> Option<MacroDefinition> {
+    state
+        .macro_library
+        .selected()
+        .filter(|item| keyboard_trigger_matches(item.trigger, key))
+        .cloned()
+        .or_else(|| {
+            state
+                .macro_library
+                .macros
+                .iter()
+                .find(|item| keyboard_trigger_matches(item.trigger, key))
+                .cloned()
+        })
+}
+
+fn macro_for_mouse_trigger(
+    state: &AppState,
+    message: Uint,
+    mouse_data: Dword,
+) -> Option<MacroDefinition> {
+    state
+        .macro_library
+        .selected()
+        .filter(|item| mouse_trigger_matches(item.trigger, message, mouse_data))
+        .cloned()
+        .or_else(|| {
+            state
+                .macro_library
+                .macros
+                .iter()
+                .find(|item| mouse_trigger_matches(item.trigger, message, mouse_data))
+                .cloned()
+        })
+}
+
+unsafe fn handle_trigger_down(state: &mut AppState, item: MacroDefinition) {
+    if state.trigger_down {
+        return;
+    }
+    state.trigger_down = true;
+    TRIGGER_HELD.store(true, Ordering::Release);
+    state.macro_status_kind = StatusKind::Running;
+    state.macro_status = format!("Menjalankan {}…", item.name);
+    unsafe { InvalidateRect(state.window, null(), FALSE) };
+    launch_macro_playback(state.window, item);
+}
+
+fn handle_trigger_up(state: &mut AppState) {
+    state.trigger_down = false;
+    TRIGGER_HELD.store(false, Ordering::Release);
+}
+
+unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: Wparam, lparam: Lparam) -> Lresult {
+    if code < HC_ACTION || lparam == 0 {
+        return unsafe { CallNextHookEx(0, code, wparam, lparam) };
+    }
+    let data = unsafe { &*(lparam as *const KbdLlHookStruct) };
+    if data.flags & LLKHF_INJECTED != 0 {
+        return unsafe { CallNextHookEx(0, code, wparam, lparam) };
+    }
+    let state_pointer = APP_STATE_POINTER.load(Ordering::Acquire);
+    if state_pointer.is_null() {
+        return unsafe { CallNextHookEx(0, code, wparam, lparam) };
+    }
+    let state = unsafe { &mut *state_pointer };
+    let message = wparam as Uint;
+    let down = matches!(message, WM_KEYDOWN | WM_SYSKEYDOWN);
+    let up = matches!(message, WM_KEYUP | WM_SYSKEYUP);
+    let key = data.vk_code as u16;
+
+    if state.recording && (down || up) {
+        if key == VK_ESCAPE {
+            if down {
+                state.suppress_escape_until_up = true;
+                unsafe { stop_macro_recording(state) };
+            } else {
+                state.suppress_escape_until_up = false;
+            }
+            return 1;
+        }
+        let event = if down {
+            MacroEvent::KeyDown(key)
+        } else {
+            MacroEvent::KeyUp(key)
+        };
+        unsafe { record_macro_event(state, event) };
+        return 1;
+    }
+    if key == VK_ESCAPE && state.suppress_escape_until_up {
+        if up {
+            state.suppress_escape_until_up = false;
+        }
+        return 1;
+    }
+    let item = macro_for_keyboard_trigger(state, key);
+    if let Some(item) = item {
+        if down {
+            unsafe { handle_trigger_down(state, item) };
+        } else if up {
+            handle_trigger_up(state);
+        }
+        return 1;
+    }
+    unsafe { CallNextHookEx(0, code, wparam, lparam) }
+}
+
+unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: Wparam, lparam: Lparam) -> Lresult {
+    if code < HC_ACTION || lparam == 0 {
+        return unsafe { CallNextHookEx(0, code, wparam, lparam) };
+    }
+    let data = unsafe { &*(lparam as *const MsLlHookStruct) };
+    if data.flags & LLMHF_INJECTED != 0 {
+        return unsafe { CallNextHookEx(0, code, wparam, lparam) };
+    }
+    let state_pointer = APP_STATE_POINTER.load(Ordering::Acquire);
+    if state_pointer.is_null() {
+        return unsafe { CallNextHookEx(0, code, wparam, lparam) };
+    }
+    let state = unsafe { &mut *state_pointer };
+    let message = wparam as Uint;
+    let button_event = match message {
+        0x0201 => Some(MacroEvent::MouseDown(MouseButton::Left)),
+        0x0202 => Some(MacroEvent::MouseUp(MouseButton::Left)),
+        0x0204 => Some(MacroEvent::MouseDown(MouseButton::Right)),
+        0x0205 => Some(MacroEvent::MouseUp(MouseButton::Right)),
+        WM_MBUTTONDOWN => Some(MacroEvent::MouseDown(MouseButton::Middle)),
+        WM_MBUTTONUP => Some(MacroEvent::MouseUp(MouseButton::Middle)),
+        WM_XBUTTONDOWN if (data.mouse_data >> 16) as u16 == XBUTTON1 => {
+            Some(MacroEvent::MouseDown(MouseButton::X1))
+        }
+        WM_XBUTTONUP if (data.mouse_data >> 16) as u16 == XBUTTON1 => {
+            Some(MacroEvent::MouseUp(MouseButton::X1))
+        }
+        WM_XBUTTONDOWN => Some(MacroEvent::MouseDown(MouseButton::X2)),
+        WM_XBUTTONUP => Some(MacroEvent::MouseUp(MouseButton::X2)),
+        WM_MOUSEWHEEL => Some(MacroEvent::Wheel((data.mouse_data >> 16) as i16)),
+        _ => None,
+    };
+    if state.recording
+        && let Some(event) = button_event
+    {
+        unsafe { record_macro_event(state, event) };
+        return 1;
+    }
+    let item = macro_for_mouse_trigger(state, message, data.mouse_data);
+    if let Some(item) = item {
+        if matches!(message, WM_MBUTTONDOWN | WM_XBUTTONDOWN) {
+            unsafe { handle_trigger_down(state, item) };
+        } else {
+            handle_trigger_up(state);
+        }
+        return 1;
+    }
+    unsafe { CallNextHookEx(0, code, wparam, lparam) }
+}
+
+unsafe fn initialize_macro_hooks(state: &mut AppState, instance: Hinstance) {
+    state.keyboard_hook =
+        unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook_proc), instance, 0) };
+    state.mouse_hook =
+        unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook_proc), instance, 0) };
+    if state.keyboard_hook == 0 || state.mouse_hook == 0 {
+        state.macro_status_kind = StatusKind::Error;
+        state.macro_status =
+            "Hook global gagal aktif. Jalankan aplikasi pada desktop Windows biasa.".to_owned();
+    }
+}
+
 unsafe fn handle_click(state: &mut AppState, target: HitTarget) {
     match target {
         HitTarget::None => {}
+        HitTarget::TimerTab => unsafe { switch_tab(state, AppTab::Timer) },
+        HitTarget::MacroTab => unsafe { switch_tab(state, AppTab::Macro) },
         HitTarget::AddThirtyMinutes => unsafe { add_preset(state, 30 * 60) },
         HitTarget::AddOneHour => unsafe { add_preset(state, 60 * 60) },
         HitTarget::AddThreeHours => unsafe { add_preset(state, 3 * 60 * 60) },
@@ -1726,6 +2981,92 @@ unsafe fn handle_click(state: &mut AppState, target: HitTarget) {
                 unsafe { begin_timer(state) };
             }
         }
+        HitTarget::MacroNew => {
+            if state.recording {
+                return;
+            }
+            state.macro_library.add_macro();
+            state.macro_lane = MacroLane::OnPress;
+            state.macro_dirty = true;
+            state.macro_status_kind = StatusKind::Ready;
+            state.macro_status = "Macro baru dibuat. Beri nama lalu rekam timeline.".to_owned();
+            unsafe {
+                sync_macro_name_edit(state);
+                InvalidateRect(state.window, null(), FALSE);
+            }
+        }
+        HitTarget::MacroItem(index) => {
+            if state.recording {
+                return;
+            }
+            if let Some(item) = state.macro_library.macros.get(index) {
+                state.macro_library.selected_id = item.id;
+                state.macro_lane = MacroLane::OnPress;
+                state.macro_status_kind = StatusKind::Ready;
+                state.macro_status = format!("Mengedit {}.", item.name);
+                unsafe {
+                    sync_macro_name_edit(state);
+                    InvalidateRect(state.window, null(), FALSE);
+                }
+            }
+        }
+        HitTarget::MacroMode(mode) => {
+            if state.recording {
+                return;
+            }
+            if let Some(item) = state.macro_library.selected_mut() {
+                item.mode = mode;
+                state.macro_dirty = true;
+                state.macro_status_kind = StatusKind::Ready;
+                state.macro_status = format!("Mode {} dipilih.", mode.label());
+                unsafe { InvalidateRect(state.window, null(), FALSE) };
+            }
+        }
+        HitTarget::MacroTrigger(trigger) => {
+            if state.recording {
+                return;
+            }
+            if let Some(item) = state.macro_library.selected_mut() {
+                item.trigger = trigger;
+                state.macro_dirty = true;
+                state.macro_status_kind = StatusKind::Ready;
+                state.macro_status = format!(
+                    "Pemicu {} dipasang. Simpan untuk permanen.",
+                    trigger.label()
+                );
+                unsafe { InvalidateRect(state.window, null(), FALSE) };
+            }
+        }
+        HitTarget::MacroLane(lane) => {
+            if !state.recording {
+                state.macro_lane = lane;
+                unsafe { InvalidateRect(state.window, null(), FALSE) };
+            }
+        }
+        HitTarget::MacroRecord => {
+            if state.recording {
+                unsafe { stop_macro_recording(state) };
+            } else {
+                unsafe { start_macro_recording(state) };
+            }
+        }
+        HitTarget::MacroClear => {
+            if !state.recording {
+                if let Some(events) = selected_lane_mut(state) {
+                    events.clear();
+                }
+                state.macro_dirty = true;
+                state.macro_status_kind = StatusKind::Warning;
+                state.macro_status =
+                    "Lane dibersihkan. Tekan Simpan untuk mempertahankan perubahan.".to_owned();
+                unsafe { InvalidateRect(state.window, null(), FALSE) };
+            }
+        }
+        HitTarget::MacroSave => {
+            if !state.recording {
+                unsafe { save_current_macro(state) };
+            }
+        }
     }
 }
 
@@ -1744,6 +3085,7 @@ unsafe extern "system" fn window_proc(
         unsafe {
             SetWindowLongPtrW(window, GWLP_USERDATA, state as isize);
             (*state).window = window;
+            APP_STATE_POINTER.store(state, Ordering::Release);
         }
         return TRUE as Lresult;
     }
@@ -1757,7 +3099,10 @@ unsafe extern "system" fn window_proc(
     match message {
         WM_CREATE => {
             let instance = unsafe { GetModuleHandleW(null()) };
-            unsafe { initialize_controls(state, instance) };
+            unsafe {
+                initialize_controls(state, instance);
+                initialize_macro_hooks(state, instance);
+            }
             0
         }
         WM_PAINT => {
@@ -1799,7 +3144,7 @@ unsafe extern "system" fn window_proc(
         WM_MOUSEMOVE => {
             let x = low_word(lparam);
             let y = high_word(lparam);
-            let new_hot = hit_test(x, y, state.running);
+            let new_hot = hit_test(x, y, state);
             if new_hot != state.hot {
                 state.hot = new_hot;
                 unsafe { InvalidateRect(window, null(), FALSE) };
@@ -1835,11 +3180,31 @@ unsafe extern "system" fn window_proc(
         WM_LBUTTONUP => {
             let x = low_word(lparam);
             let y = high_word(lparam);
-            let target = hit_test(x, y, state.running);
+            let target = hit_test(x, y, state);
             unsafe { handle_click(state, target) };
             0
         }
-        WM_COMMAND => 0,
+        WM_COMMAND => {
+            let control_id = (wparam & 0xFFFF) as u16;
+            let notification = ((wparam >> 16) & 0xFFFF) as u16;
+            if control_id == 105 && notification == 0x0300 && state.tab == AppTab::Macro {
+                state.macro_dirty = true;
+                unsafe { InvalidateRect(window, null(), FALSE) };
+            }
+            0
+        }
+        WM_APP_MACRO_DONE => {
+            if wparam != 0 {
+                state.macro_status_kind = StatusKind::Sent;
+                state.macro_status = "Macro selesai dijalankan.".to_owned();
+            } else {
+                state.macro_status_kind = StatusKind::Error;
+                state.macro_status =
+                    "Macro kosong atau Windows menolak salah satu input.".to_owned();
+            }
+            unsafe { InvalidateRect(window, null(), FALSE) };
+            0
+        }
         WM_TIMER => {
             if wparam == TIMER_COUNTDOWN && state.running {
                 unsafe { update_countdown(state) };
@@ -1853,6 +3218,9 @@ unsafe extern "system" fn window_proc(
             0
         }
         WM_CLOSE => {
+            if state.recording {
+                unsafe { stop_macro_recording(state) };
+            }
             if state.running {
                 let response = unsafe {
                     MessageBoxW(
@@ -1867,6 +3235,20 @@ unsafe extern "system" fn window_proc(
                     return 0;
                 }
             }
+            if state.macro_dirty {
+                let response = unsafe {
+                    MessageBoxW(
+                        window,
+                        wide("Ada perubahan macro yang belum disimpan. Tutup tanpa menyimpan?")
+                            .as_ptr(),
+                        wide("Macro belum disimpan").as_ptr(),
+                        MB_YESNO | MB_ICONWARNING,
+                    )
+                };
+                if response != IDYES {
+                    return 0;
+                }
+            }
             unsafe { DestroyWindow(window) };
             0
         }
@@ -1874,11 +3256,14 @@ unsafe extern "system" fn window_proc(
             unsafe {
                 KillTimer(window, TIMER_COUNTDOWN);
                 KillTimer(window, TIMER_CAPTURE);
+                MACRO_STOP.store(true, Ordering::Release);
+                TRIGGER_HELD.store(false, Ordering::Release);
                 PostQuitMessage(0);
             }
             0
         }
         WM_NCDESTROY => unsafe {
+            APP_STATE_POINTER.store(null_mut(), Ordering::Release);
             state.cleanup();
             SetWindowLongPtrW(window, GWLP_USERDATA, 0);
             drop(Box::from_raw(state_pointer));
@@ -2027,6 +3412,17 @@ mod windows_e2e_tests {
         }
     }
 
+    unsafe fn wait_macro_idle() {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while MACRO_PLAYING.load(Ordering::Acquire) && Instant::now() < deadline {
+            unsafe { pump_messages_for(Duration::from_millis(20)) };
+        }
+        assert!(
+            !MACRO_PLAYING.load(Ordering::Acquire),
+            "playback macro harus kembali idle"
+        );
+    }
+
     unsafe fn save_window_bmp(window: Hwnd, path: &Path) -> Result<(), String> {
         let mut bounds = Rect::default();
         if unsafe { GetWindowRect(window, &mut bounds) } == FALSE {
@@ -2170,6 +3566,10 @@ mod windows_e2e_tests {
             let state_pointer = GetWindowLongPtrW(main_window, GWLP_USERDATA) as *mut AppState;
             assert!(!state_pointer.is_null());
             let state = &mut *state_pointer;
+            assert_ne!(state.keyboard_hook, 0, "keyboard hook harus aktif");
+            assert_ne!(state.mouse_hook, 0, "mouse hook harus aktif");
+            state.macro_library = MacroLibrary::default();
+            sync_macro_name_edit(state);
 
             state.target = Some(TargetWindow {
                 window: target_window,
@@ -2229,6 +3629,231 @@ mod windows_e2e_tests {
             );
             save_window_bmp(target_window, Path::new("qa/e2e-target.bmp"))
                 .expect("snapshot target dibuat");
+
+            switch_tab(state, AppTab::Macro);
+            state
+                .macro_library
+                .selected_mut()
+                .expect("macro default tersedia")
+                .on_press
+                .clear();
+            start_macro_recording(state);
+            assert!(state.recording);
+            let recorded_key = KbdLlHookStruct {
+                vk_code: 0x41,
+                scan_code: 0,
+                flags: 0,
+                time: 0,
+                extra_info: 0,
+            };
+            keyboard_hook_proc(
+                HC_ACTION,
+                WM_KEYDOWN as Wparam,
+                &recorded_key as *const _ as Lparam,
+            );
+            keyboard_hook_proc(
+                HC_ACTION,
+                WM_KEYUP as Wparam,
+                &recorded_key as *const _ as Lparam,
+            );
+            let escape = KbdLlHookStruct {
+                vk_code: VK_ESCAPE as Dword,
+                scan_code: 0,
+                flags: 0,
+                time: 0,
+                extra_info: 0,
+            };
+            keyboard_hook_proc(
+                HC_ACTION,
+                WM_KEYDOWN as Wparam,
+                &escape as *const _ as Lparam,
+            );
+            keyboard_hook_proc(HC_ACTION, WM_KEYUP as Wparam, &escape as *const _ as Lparam);
+            assert!(!state.recording, "Esc harus menghentikan recording");
+            let recorded = &state
+                .macro_library
+                .selected()
+                .expect("macro recorder tersedia")
+                .on_press;
+            assert!(
+                recorded.contains(&MacroEvent::KeyDown(0x41))
+                    && recorded.contains(&MacroEvent::KeyUp(0x41)),
+                "recorder harus menyimpan key down dan key up: {recorded:?}"
+            );
+
+            let item = state
+                .macro_library
+                .selected_mut()
+                .expect("macro default tersedia");
+            item.name = "Lanjut AI".to_owned();
+            item.mode = MacroMode::NoRepeat;
+            item.trigger = MacroTrigger::F8;
+            item.on_press = vec![
+                MacroEvent::Delay(25),
+                MacroEvent::KeyDown(VK_RETURN),
+                MacroEvent::KeyUp(VK_RETURN),
+            ];
+            sync_macro_name_edit(state);
+            InvalidateRect(main_window, null(), FALSE);
+            UpdateWindow(main_window);
+            pump_messages_for(Duration::from_millis(150));
+            save_window_bmp(main_window, Path::new("qa/vibetimer-macro.bmp"))
+                .expect("snapshot macro dibuat");
+
+            SetForegroundWindow(target_window);
+            SetFocus(target_edit);
+            let before_macro = get_window_text(target_edit).len();
+            let key = KbdLlHookStruct {
+                vk_code: VK_F8 as Dword,
+                scan_code: 0,
+                flags: 0,
+                time: 0,
+                extra_info: 0,
+            };
+            assert_eq!(
+                keyboard_hook_proc(HC_ACTION, WM_KEYDOWN as Wparam, &key as *const _ as Lparam),
+                1,
+                "hook harus menahan pemicu F8"
+            );
+            assert_eq!(
+                keyboard_hook_proc(HC_ACTION, WM_KEYUP as Wparam, &key as *const _ as Lparam),
+                1,
+                "hook harus menahan release F8"
+            );
+            pump_messages_for(Duration::from_millis(350));
+            wait_macro_idle();
+            let after_macro = get_window_text(target_edit).len();
+            assert!(
+                after_macro > before_macro,
+                "macro F8 harus mengirim Enter ke target"
+            );
+            assert_eq!(state.macro_status_kind, StatusKind::Sent);
+
+            state
+                .macro_library
+                .selected_mut()
+                .expect("macro mouse tersedia")
+                .trigger = MacroTrigger::MouseX1;
+            let before_mouse_macro = get_window_text(target_edit).len();
+            let mouse = MsLlHookStruct {
+                point: Point::default(),
+                mouse_data: (XBUTTON1 as Dword) << 16,
+                flags: 0,
+                time: 0,
+                extra_info: 0,
+            };
+            assert_eq!(
+                mouse_hook_proc(
+                    HC_ACTION,
+                    WM_XBUTTONDOWN as Wparam,
+                    &mouse as *const _ as Lparam,
+                ),
+                1,
+                "hook harus menahan pemicu Mouse 4"
+            );
+            assert_eq!(
+                mouse_hook_proc(
+                    HC_ACTION,
+                    WM_XBUTTONUP as Wparam,
+                    &mouse as *const _ as Lparam,
+                ),
+                1,
+                "hook harus menahan release Mouse 4"
+            );
+            pump_messages_for(Duration::from_millis(350));
+            wait_macro_idle();
+            assert!(
+                get_window_text(target_edit).len() > before_mouse_macro,
+                "macro Mouse 4 harus mengirim Enter ke target"
+            );
+            assert_eq!(state.macro_status_kind, StatusKind::Sent);
+
+            let item = state
+                .macro_library
+                .selected_mut()
+                .expect("macro repeat tersedia");
+            item.mode = MacroMode::RepeatWhileHolding;
+            item.trigger = MacroTrigger::F9;
+            item.on_press = vec![
+                MacroEvent::Delay(20),
+                MacroEvent::KeyDown(VK_RETURN),
+                MacroEvent::KeyUp(VK_RETURN),
+            ];
+            let f9 = KbdLlHookStruct {
+                vk_code: VK_F9 as Dword,
+                scan_code: 0,
+                flags: 0,
+                time: 0,
+                extra_info: 0,
+            };
+            let before_repeat_inputs = TEST_MACRO_INPUT_COUNT.load(Ordering::Relaxed);
+            SetForegroundWindow(target_window);
+            SetFocus(target_edit);
+            keyboard_hook_proc(HC_ACTION, WM_KEYDOWN as Wparam, &f9 as *const _ as Lparam);
+            pump_messages_for(Duration::from_millis(120));
+            keyboard_hook_proc(HC_ACTION, WM_KEYUP as Wparam, &f9 as *const _ as Lparam);
+            wait_macro_idle();
+            assert!(
+                TEST_MACRO_INPUT_COUNT.load(Ordering::Relaxed) >= before_repeat_inputs + 4,
+                "While Holding harus mengulang macro"
+            );
+
+            let item = state
+                .macro_library
+                .selected_mut()
+                .expect("macro toggle tersedia");
+            item.mode = MacroMode::Toggle;
+            item.trigger = MacroTrigger::F9;
+            let before_toggle_inputs = TEST_MACRO_INPUT_COUNT.load(Ordering::Relaxed);
+            SetForegroundWindow(target_window);
+            SetFocus(target_edit);
+            keyboard_hook_proc(HC_ACTION, WM_KEYDOWN as Wparam, &f9 as *const _ as Lparam);
+            keyboard_hook_proc(HC_ACTION, WM_KEYUP as Wparam, &f9 as *const _ as Lparam);
+            assert!(
+                MACRO_PLAYING.load(Ordering::Acquire),
+                "Toggle harus memulai playback pada tekan pertama"
+            );
+            pump_messages_for(Duration::from_millis(120));
+            keyboard_hook_proc(HC_ACTION, WM_KEYDOWN as Wparam, &f9 as *const _ as Lparam);
+            keyboard_hook_proc(HC_ACTION, WM_KEYUP as Wparam, &f9 as *const _ as Lparam);
+            wait_macro_idle();
+            assert!(
+                TEST_MACRO_INPUT_COUNT.load(Ordering::Relaxed) >= before_toggle_inputs + 4,
+                "Toggle harus mengulang hingga pemicu ditekan lagi"
+            );
+
+            let item = state
+                .macro_library
+                .selected_mut()
+                .expect("macro sequence tersedia");
+            item.mode = MacroMode::Sequence;
+            item.trigger = MacroTrigger::F8;
+            item.on_press = vec![
+                MacroEvent::Delay(10),
+                MacroEvent::KeyDown(VK_RETURN),
+                MacroEvent::KeyUp(VK_RETURN),
+            ];
+            item.while_holding = vec![
+                MacroEvent::Delay(20),
+                MacroEvent::KeyDown(VK_RETURN),
+                MacroEvent::KeyUp(VK_RETURN),
+            ];
+            item.on_release = vec![
+                MacroEvent::Delay(10),
+                MacroEvent::KeyDown(VK_RETURN),
+                MacroEvent::KeyUp(VK_RETURN),
+            ];
+            let before_sequence_inputs = TEST_MACRO_INPUT_COUNT.load(Ordering::Relaxed);
+            SetForegroundWindow(target_window);
+            SetFocus(target_edit);
+            keyboard_hook_proc(HC_ACTION, WM_KEYDOWN as Wparam, &key as *const _ as Lparam);
+            pump_messages_for(Duration::from_millis(80));
+            keyboard_hook_proc(HC_ACTION, WM_KEYUP as Wparam, &key as *const _ as Lparam);
+            wait_macro_idle();
+            assert!(
+                TEST_MACRO_INPUT_COUNT.load(Ordering::Relaxed) >= before_sequence_inputs + 6,
+                "Sequence harus menjalankan On Press, While Holding, dan On Release"
+            );
 
             TEST_INPUT_TARGET.store(0, Ordering::Relaxed);
             DestroyWindow(target_window);
