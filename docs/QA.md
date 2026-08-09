@@ -12,20 +12,42 @@ Platform build: Windows x64, Rust 1.97.1
 | `cargo test` | Lulus, 9 test (8 unit + 1 integration E2E) |
 | `cargo build --release` | Lulus |
 | Ukuran `VibeTimer.exe` | 197.632 byte (193 KB) |
-| Working set setelah startup | 7,27 MB |
-| Private memory setelah startup | 1,21 MB |
-| Handle setelah startup | 87 |
+| Working set setelah startup | 10,08 MiB |
+| Private memory setelah startup | 1,82 MiB |
+| Handle setelah startup | 115 |
+| Status proses release | Responding / sehat |
 
 ## Cakupan test
 
 Delapan unit test memeriksa validasi waktu serta model, serialisasi, validasi,
 default aman, dan penyimpanan atomik macro. Satu integration test Windows
 membuat UI VibeTimer dan jendela target dengan edit control sungguhan. Test itu
-menjalankan timer satu detik, memverifikasi `lanjutkan` + Enter, membuka tab
-Macro, merekam key down/up melalui callback hook, menghentikan recording dengan
-Esc, lalu memicu macro No Repeat melalui F8 dan Mouse 4 serta memverifikasi Enter
-diterima target. Controller Repeat While Holding, Toggle, dan ketiga lane
-Sequence juga dijalankan dengan assertion jumlah input playback.
+menjalankan timer satu detik dalam mode **Teks + Enter** dan **Hanya Enter**,
+memverifikasi pembatalan tidak mengirim input, serta menolak PID target yang
+tidak cocok. Ketiga preset waktu dan seluruh hit-area Timer juga diuji.
+
+Pada Macro Studio, E2E membuat dan memilih macro, mengubah empat mode, lima
+pemicu, dan tiga lane, membersihkan lane, merekam keyboard + klik + wheel,
+menghentikan recording dengan Esc, serta melakukan save/load file nyata.
+Playback **No Repeat** dijalankan melalui F8, Middle, Mouse 4, dan Mouse 5;
+F9 menjalankan **While Holding** serta **Toggle**; sedangkan **Sequence**
+memverifikasi On Press, While Holding, dan On Release.
+
+## Matriks fungsi UI
+
+| Fungsi terlihat | Verifikasi |
+|---|---|
+| Input jam/menit/detik + `+30 mnt`, `+1 jam`, `+3 jam` | Unit + E2E nilai akhir 04:30:00 |
+| Pilih dan validasi target | Window handle + PID diuji; target salah ditolak |
+| Hanya Enter / Teks + Enter | Kedua aksi diterima edit control Windows nyata |
+| Mulai / batalkan timer | Countdown selesai sekali; cancel mengirim 0 input |
+| Tab Timer / Macro | Hit-area dan resize native dijalankan dalam E2E |
+| Macro baru / pilih macro / edit nama | State pilihan dan nama tersimpan diverifikasi |
+| 4 mode macro | No Repeat, While Holding, Toggle, Sequence dijalankan |
+| 5 pemicu global | F8, F9, Middle, Mouse 4, Mouse 5 dipetakan dan dipicu |
+| 3 lane timeline | Pemilihan, clear, recording, dan Sequence diverifikasi |
+| Rekam / Esc untuk selesai | Key down/up, mouse down/up, wheel terekam |
+| Simpan | File ditulis atomik lalu dimuat ulang dan dibandingkan |
 
 Integration test juga menangkap lima artefak lokal di folder `qa/`:
 
@@ -38,17 +60,18 @@ Integration test juga menangkap lima artefak lokal di folder `qa/`:
 Folder tersebut sengaja diabaikan Git karena merupakan hasil test yang dapat
 dibuat ulang.
 
-## QA visual 0.2.1
+## QA visual 0.2.2
 
 Snapshot idle, running, Macro berisi event, dan Macro empty-state dirender lewat
 `PrintWindow` dari aplikasi native yang sama, lalu diinspeksi pada resolusi asli.
-Redesign menggunakan satu bahasa visual: background hitam hangat, kartu kerja
-ivory, acid-lime sebagai aksen interaksi, Segoe UI Variable Display, tab berbasis
-teks, serta pengurangan border dan nested-card. Tidak ada image asset yang
+Redesign menggunakan satu bahasa visual dark graphite: background hitam hangat,
+panel gelap berlapis tipis, acid-lime sebagai aksen interaksi, Segoe UI Variable
+Display, tab berbasis teks, serta pengurangan border dan nested-card. Tidak ada
+panel putih/ivory atau hover yang berubah putih. Tidak ada image asset yang
 dibakar ke UI; seluruh visual tetap GDI programatik.
 
-SHA-256 release 0.2.1:
-`A5DEDA430080D4F0C7EDF35CE7E3066E6CD8AEDD755F6D175F2415D565207CC3`.
+SHA-256 release 0.2.2:
+`EA6A020EF692B290F3DEDDDB8CD112A41AD226F06E1996BAFC28AD27A4916737`.
 
 ## Batas verifikasi sandbox
 

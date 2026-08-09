@@ -174,8 +174,10 @@ const COLOR_DIM: u32 = rgb(98, 105, 91);
 const COLOR_ACCENT: u32 = rgb(202, 255, 55);
 const COLOR_ACCENT_HOT: u32 = rgb(218, 255, 112);
 const COLOR_ACCENT_DARK: u32 = rgb(42, 55, 15);
-const COLOR_LIGHT: u32 = rgb(242, 244, 235);
-const COLOR_LIGHT_2: u32 = rgb(220, 224, 210);
+const COLOR_PANEL: u32 = rgb(17, 20, 16);
+const COLOR_PANEL_2: u32 = rgb(28, 32, 25);
+const COLOR_PANEL_3: u32 = rgb(37, 42, 33);
+const COLOR_PANEL_BORDER: u32 = rgb(48, 55, 43);
 const COLOR_INK: u32 = rgb(13, 15, 12);
 const COLOR_INK_MUTED: u32 = rgb(82, 88, 77);
 const COLOR_SUCCESS: u32 = rgb(48, 210, 137);
@@ -636,7 +638,7 @@ struct AppState {
     prompt_edit: Hwnd,
     macro_name_edit: Hwnd,
     edit_brush: Hbrush,
-    light_edit_brush: Hbrush,
+    panel_edit_brush: Hbrush,
     fonts: Fonts,
     action_mode: ActionMode,
     status_kind: StatusKind,
@@ -688,7 +690,7 @@ impl AppState {
             prompt_edit: 0,
             macro_name_edit: 0,
             edit_brush: 0,
-            light_edit_brush: 0,
+            panel_edit_brush: 0,
             fonts: Fonts::default(),
             action_mode: ActionMode::TextAndEnter,
             status_kind: StatusKind::Ready,
@@ -766,8 +768,8 @@ impl AppState {
             if self.edit_brush != 0 {
                 DeleteObject(self.edit_brush);
             }
-            if self.light_edit_brush != 0 {
-                DeleteObject(self.light_edit_brush);
+            if self.panel_edit_brush != 0 {
+                DeleteObject(self.panel_edit_brush);
             }
             if self.keyboard_hook != 0 {
                 UnhookWindowsHookEx(self.keyboard_hook);
@@ -1082,7 +1084,7 @@ unsafe fn draw_flat_button(
         } else if fill == COLOR_INK {
             rgb(35, 39, 32)
         } else {
-            COLOR_LIGHT
+            COLOR_PANEL_3
         }
     } else {
         fill
@@ -1405,12 +1407,12 @@ unsafe fn draw_timer_interface_v3(dc: Hdc, state: &AppState) {
         }
 
         let config = Rect::new(24, 286, 496, 526);
-        rounded_box(dc, config, 26, COLOR_LIGHT, COLOR_LIGHT);
+        rounded_box(dc, config, 26, COLOR_PANEL, COLOR_PANEL_BORDER);
         draw_label(
             dc,
             "Target",
             Rect::new(42, 302, 190, 324),
-            COLOR_INK_MUTED,
+            COLOR_MUTED,
             state.fonts.small,
             DT_LEFT | DT_VCENTER | DT_SINGLELINE,
         );
@@ -1423,7 +1425,7 @@ unsafe fn draw_timer_interface_v3(dc: Hdc, state: &AppState) {
             dc,
             target_text,
             Rect::new(42, 323, 344, 350),
-            COLOR_INK,
+            COLOR_TEXT,
             state.fonts.semibold,
             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
         );
@@ -1435,7 +1437,7 @@ unsafe fn draw_timer_interface_v3(dc: Hdc, state: &AppState) {
                 "Pilih jendela input AI"
             },
             Rect::new(42, 348, 344, 368),
-            COLOR_INK_MUTED,
+            COLOR_MUTED,
             state.fonts.small,
             DT_LEFT | DT_VCENTER | DT_SINGLELINE,
         );
@@ -1452,13 +1454,13 @@ unsafe fn draw_timer_interface_v3(dc: Hdc, state: &AppState) {
             state.hot == HitTarget::PickTarget && !state.running,
             state.fonts.small,
         );
-        draw_hairline(dc, 42, 383, 478, rgb(196, 200, 188));
+        draw_hairline(dc, 42, 383, 478, COLOR_PANEL_BORDER);
 
         draw_label(
             dc,
             "Aksi saat nol",
             Rect::new(42, 394, 250, 418),
-            COLOR_INK_MUTED,
+            COLOR_MUTED,
             state.fonts.small,
             DT_LEFT | DT_VCENTER | DT_SINGLELINE,
         );
@@ -1471,7 +1473,7 @@ unsafe fn draw_timer_interface_v3(dc: Hdc, state: &AppState) {
                 dc,
                 action,
                 Rect::new(42, 424, 458, 453),
-                COLOR_INK,
+                COLOR_TEXT,
                 state.fonts.semibold,
                 DT_LEFT | DT_VCENTER | DT_SINGLELINE,
             );
@@ -1480,7 +1482,7 @@ unsafe fn draw_timer_interface_v3(dc: Hdc, state: &AppState) {
                     dc,
                     &format!("“{}”", state.armed_prompt),
                     Rect::new(42, 460, 458, 495),
-                    COLOR_INK_MUTED,
+                    COLOR_MUTED,
                     state.fonts.body,
                     DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
                 );
@@ -1504,8 +1506,8 @@ unsafe fn draw_timer_interface_v3(dc: Hdc, state: &AppState) {
                     dc,
                     rect,
                     label,
-                    if active { COLOR_ACCENT } else { COLOR_LIGHT_2 },
-                    COLOR_INK,
+                    if active { COLOR_ACCENT } else { COLOR_PANEL_2 },
+                    if active { COLOR_INK } else { COLOR_TEXT },
                     state.hot == target,
                     state.fonts.small,
                 );
@@ -1619,7 +1621,7 @@ unsafe fn draw_macro_interface_v3(dc: Hdc, state: &AppState) {
         }
 
         let editor_panel = Rect::new(252, 84, 936, 608);
-        rounded_box(dc, editor_panel, 24, COLOR_LIGHT, COLOR_LIGHT);
+        rounded_box(dc, editor_panel, 24, COLOR_PANEL, COLOR_PANEL_BORDER);
         draw_label(
             dc,
             if state.recording {
@@ -1631,7 +1633,7 @@ unsafe fn draw_macro_interface_v3(dc: Hdc, state: &AppState) {
             if state.recording {
                 COLOR_ERROR
             } else {
-                COLOR_INK_MUTED
+                COLOR_MUTED
             },
             state.fonts.small,
             DT_LEFT | DT_VCENTER | DT_SINGLELINE,
@@ -1653,15 +1655,15 @@ unsafe fn draw_macro_interface_v3(dc: Hdc, state: &AppState) {
             dc,
             Rect::new(270, 121, 916, 162),
             13,
-            COLOR_LIGHT_2,
-            COLOR_LIGHT_2,
+            COLOR_PANEL_2,
+            COLOR_PANEL_BORDER,
         );
 
         draw_label(
             dc,
             "Perilaku",
             Rect::new(278, 151, 480, 177),
-            COLOR_INK_MUTED,
+            COLOR_MUTED,
             state.fonts.small,
             DT_LEFT | DT_VCENTER | DT_SINGLELINE,
         );
@@ -1683,27 +1685,23 @@ unsafe fn draw_macro_interface_v3(dc: Hdc, state: &AppState) {
                 if selected {
                     COLOR_INK
                 } else if hot {
-                    rgb(231, 234, 223)
+                    COLOR_PANEL_3
                 } else {
-                    COLOR_LIGHT_2
+                    COLOR_PANEL_2
                 },
                 if selected {
                     COLOR_INK
                 } else if hot {
                     COLOR_BORDER_HOT
                 } else {
-                    COLOR_LIGHT_2
+                    COLOR_PANEL_BORDER
                 },
             );
             draw_label(
                 dc,
                 &format!("0{}", index + 1),
                 Rect::new(rect.left + 12, rect.top + 5, rect.right - 10, rect.top + 25),
-                if selected {
-                    COLOR_ACCENT
-                } else {
-                    COLOR_INK_MUTED
-                },
+                if selected { COLOR_ACCENT } else { COLOR_MUTED },
                 state.fonts.small,
                 DT_LEFT | DT_VCENTER | DT_SINGLELINE,
             );
@@ -1716,7 +1714,7 @@ unsafe fn draw_macro_interface_v3(dc: Hdc, state: &AppState) {
                     rect.right - 10,
                     rect.bottom - 7,
                 ),
-                if selected { COLOR_TEXT } else { COLOR_INK },
+                COLOR_TEXT,
                 state.fonts.semibold,
                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
             );
@@ -1726,7 +1724,7 @@ unsafe fn draw_macro_interface_v3(dc: Hdc, state: &AppState) {
             dc,
             "Pemicu",
             Rect::new(278, 245, 500, 269),
-            COLOR_INK_MUTED,
+            COLOR_MUTED,
             state.fonts.small,
             DT_LEFT | DT_VCENTER | DT_SINGLELINE,
         );
@@ -1736,8 +1734,8 @@ unsafe fn draw_macro_interface_v3(dc: Hdc, state: &AppState) {
                 dc,
                 macro_trigger_rect(index),
                 trigger.label(),
-                if active { COLOR_INK } else { COLOR_LIGHT_2 },
-                if active { COLOR_ACCENT } else { COLOR_INK },
+                if active { COLOR_INK } else { COLOR_PANEL_2 },
+                if active { COLOR_ACCENT } else { COLOR_TEXT },
                 state.hot == HitTarget::MacroTrigger(trigger),
                 state.fonts.small,
             );
@@ -1747,7 +1745,7 @@ unsafe fn draw_macro_interface_v3(dc: Hdc, state: &AppState) {
             dc,
             "Timeline",
             Rect::new(278, 310, 500, 334),
-            COLOR_INK_MUTED,
+            COLOR_MUTED,
             state.fonts.small,
             DT_LEFT | DT_VCENTER | DT_SINGLELINE,
         );
@@ -1769,8 +1767,8 @@ unsafe fn draw_macro_interface_v3(dc: Hdc, state: &AppState) {
                 dc,
                 rect,
                 label,
-                if active { COLOR_INK } else { COLOR_LIGHT_2 },
-                if active { COLOR_ACCENT } else { COLOR_INK },
+                if active { COLOR_INK } else { COLOR_PANEL_2 },
+                if active { COLOR_ACCENT } else { COLOR_TEXT },
                 state.hot == HitTarget::MacroLane(lane),
                 state.fonts.small,
             );
@@ -1780,7 +1778,7 @@ unsafe fn draw_macro_interface_v3(dc: Hdc, state: &AppState) {
             dc,
             &format!("{} langkah  ·  {} ms", events.len(), total_delay(events)),
             Rect::new(735, 331, 908, 365),
-            COLOR_INK_MUTED,
+            COLOR_MUTED,
             state.fonts.small,
             DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
         );
@@ -1858,8 +1856,8 @@ unsafe fn draw_macro_interface_v3(dc: Hdc, state: &AppState) {
             dc,
             RECT_MACRO_CLEAR,
             "Bersihkan bagian",
-            COLOR_LIGHT_2,
-            COLOR_INK,
+            COLOR_PANEL_2,
+            COLOR_TEXT,
             state.hot == HitTarget::MacroClear,
             state.fonts.small,
         );
@@ -2601,7 +2599,7 @@ unsafe fn initialize_controls(state: &mut AppState, instance: Hinstance) {
         state.fonts.semibold = make_font(16, 650);
         state.fonts.small = make_font(13, 600);
         state.edit_brush = CreateSolidBrush(COLOR_BG);
-        state.light_edit_brush = CreateSolidBrush(COLOR_LIGHT_2);
+        state.panel_edit_brush = CreateSolidBrush(COLOR_PANEL_2);
 
         state.hour_edit = create_edit(
             state.window,
@@ -3842,12 +3840,12 @@ unsafe extern "system" fn window_proc(
         WM_ERASEBKGND => 1,
         WM_CTLCOLOREDIT | WM_CTLCOLORSTATIC => {
             let dc = wparam as Hdc;
-            let light_editor = lparam == state.macro_name_edit;
+            let panel_editor = lparam == state.macro_name_edit;
             unsafe {
                 SetTextColor(
                     dc,
-                    if light_editor {
-                        COLOR_INK
+                    if panel_editor {
+                        COLOR_TEXT
                     } else if state.action_mode == ActionMode::EnterOnly
                         && lparam == state.prompt_edit
                     {
@@ -3858,15 +3856,15 @@ unsafe extern "system" fn window_proc(
                 );
                 SetBkColor(
                     dc,
-                    if light_editor {
-                        COLOR_LIGHT_2
+                    if panel_editor {
+                        COLOR_PANEL_2
                     } else {
                         COLOR_BG
                     },
                 );
             }
-            if light_editor {
-                state.light_edit_brush
+            if panel_editor {
+                state.panel_edit_brush
             } else {
                 state.edit_brush
             }
@@ -4301,6 +4299,26 @@ mod windows_e2e_tests {
             state.macro_library = MacroLibrary::default();
             sync_macro_name_edit(state);
 
+            assert_eq!(hit_test(340, 39, state), HitTarget::TimerTab);
+            assert_eq!(hit_test(430, 39, state), HitTarget::MacroTab);
+            assert_eq!(hit_test(100, 240, state), HitTarget::AddThirtyMinutes);
+            assert_eq!(hit_test(210, 240, state), HitTarget::AddOneHour);
+            assert_eq!(hit_test(330, 240, state), HitTarget::AddThreeHours);
+            assert_eq!(hit_test(410, 330, state), HitTarget::PickTarget);
+            assert_eq!(hit_test(145, 442, state), HitTarget::EnterOnly);
+            assert_eq!(hit_test(350, 442, state), HitTarget::TextAndEnter);
+            assert_eq!(hit_test(260, 575, state), HitTarget::MainAction);
+
+            set_duration_fields(state, DurationFields::new(0, 0, 0));
+            handle_click(state, HitTarget::AddThirtyMinutes);
+            handle_click(state, HitTarget::AddOneHour);
+            handle_click(state, HitTarget::AddThreeHours);
+            assert_eq!(
+                read_duration_fields(state),
+                DurationFields::new(4, 30, 0),
+                "ketiga tombol preset harus menjumlahkan waktu dengan benar"
+            );
+
             state.target = Some(TargetWindow {
                 window: target_window,
                 process_id: GetCurrentProcessId(),
@@ -4309,6 +4327,19 @@ mod windows_e2e_tests {
             assert_eq!(
                 state.target.as_ref().map(|target| target.title.as_str()),
                 Some("VibeTimer E2E Target")
+            );
+            assert!(
+                validate_target(state.target.as_ref().expect("target tersedia")).is_ok(),
+                "target yang hidup dan PID-nya cocok harus valid"
+            );
+            let invalid_target = TargetWindow {
+                window: target_window,
+                process_id: 0,
+                title: "PID salah".to_owned(),
+            };
+            assert!(
+                validate_target(&invalid_target).is_err(),
+                "PID target yang berubah harus ditolak"
             );
 
             state.running = true;
@@ -4360,7 +4391,90 @@ mod windows_e2e_tests {
             save_window_bmp(target_window, Path::new("qa/e2e-target.bmp"))
                 .expect("snapshot target dibuat");
 
+            SetWindowTextW(target_edit, wide("").as_ptr());
+            handle_click(state, HitTarget::EnterOnly);
+            assert_eq!(state.action_mode, ActionMode::EnterOnly);
+            set_duration_fields(state, DurationFields::new(0, 0, 1));
+            begin_timer(state);
+            pump_messages_for(Duration::from_millis(1_300));
+            assert_eq!(state.status_kind, StatusKind::Sent);
+            let enter_only = get_window_text(target_edit);
+            assert!(
+                !enter_only.is_empty() && !enter_only.contains("lanjutkan"),
+                "mode Hanya Enter tidak boleh mengetik prompt: {enter_only:?}"
+            );
+
+            SetWindowTextW(target_edit, wide("").as_ptr());
+            set_duration_fields(state, DurationFields::new(0, 0, 5));
+            begin_timer(state);
+            assert!(state.running);
+            pump_messages_for(Duration::from_millis(120));
+            handle_click(state, HitTarget::MainAction);
+            pump_messages_for(Duration::from_millis(180));
+            assert!(!state.running, "tombol utama harus membatalkan timer aktif");
+            assert_eq!(state.status_kind, StatusKind::Warning);
+            assert!(
+                get_window_text(target_edit).is_empty(),
+                "timer yang dibatalkan tidak boleh mengirim input"
+            );
+
             switch_tab(state, AppTab::Macro);
+            assert_eq!(hit_test(100, 137, state), HitTarget::MacroNew);
+            assert_eq!(
+                hit_test(350, 205, state),
+                HitTarget::MacroMode(MacroMode::NoRepeat)
+            );
+            assert_eq!(
+                hit_test(550, 290, state),
+                HitTarget::MacroTrigger(MacroTrigger::MouseMiddle)
+            );
+            assert_eq!(
+                hit_test(650, 348, state),
+                HitTarget::MacroLane(MacroLane::OnRelease)
+            );
+            assert_eq!(hit_test(375, 570, state), HitTarget::MacroRecord);
+            assert_eq!(hit_test(550, 570, state), HitTarget::MacroClear);
+            assert_eq!(hit_test(835, 570, state), HitTarget::MacroSave);
+
+            handle_click(state, HitTarget::MacroNew);
+            assert_eq!(state.macro_library.macros.len(), 2);
+            assert_eq!(state.macro_library.selected_id, 2);
+            handle_click(state, HitTarget::MacroItem(0));
+            assert_eq!(state.macro_library.selected_id, 1);
+            handle_click(state, HitTarget::MacroMode(MacroMode::Toggle));
+            handle_click(state, HitTarget::MacroTrigger(MacroTrigger::MouseMiddle));
+            handle_click(state, HitTarget::MacroLane(MacroLane::OnRelease));
+            assert_eq!(
+                state.macro_library.selected().expect("macro dipilih").mode,
+                MacroMode::Toggle
+            );
+            assert_eq!(
+                state
+                    .macro_library
+                    .selected()
+                    .expect("macro dipilih")
+                    .trigger,
+                MacroTrigger::MouseMiddle
+            );
+            assert_eq!(state.macro_lane, MacroLane::OnRelease);
+            state
+                .macro_library
+                .selected_mut()
+                .expect("macro dipilih")
+                .on_release = vec![MacroEvent::KeyDown(0x42)];
+            handle_click(state, HitTarget::MacroClear);
+            assert!(
+                state
+                    .macro_library
+                    .selected()
+                    .expect("macro dipilih")
+                    .on_release
+                    .is_empty(),
+                "Bersihkan bagian harus mengosongkan lane aktif"
+            );
+            handle_click(state, HitTarget::MacroMode(MacroMode::NoRepeat));
+            handle_click(state, HitTarget::MacroTrigger(MacroTrigger::F8));
+            handle_click(state, HitTarget::MacroLane(MacroLane::OnPress));
             state
                 .macro_library
                 .selected_mut()
@@ -4391,6 +4505,32 @@ mod windows_e2e_tests {
                 WM_KEYUP as Wparam,
                 &recorded_key as *const _ as Lparam,
             );
+            let recorded_mouse = MsLlHookStruct {
+                point: Point::default(),
+                mouse_data: 0,
+                flags: 0,
+                time: 0,
+                extra_info: 0,
+            };
+            mouse_hook_proc(
+                HC_ACTION,
+                0x0201 as Wparam,
+                &recorded_mouse as *const _ as Lparam,
+            );
+            mouse_hook_proc(
+                HC_ACTION,
+                0x0202 as Wparam,
+                &recorded_mouse as *const _ as Lparam,
+            );
+            let recorded_wheel = MsLlHookStruct {
+                mouse_data: 120u32 << 16,
+                ..recorded_mouse
+            };
+            mouse_hook_proc(
+                HC_ACTION,
+                WM_MOUSEWHEEL as Wparam,
+                &recorded_wheel as *const _ as Lparam,
+            );
             let escape = KbdLlHookStruct {
                 vk_code: VK_ESCAPE as Dword,
                 scan_code: 0,
@@ -4415,6 +4555,12 @@ mod windows_e2e_tests {
                     && recorded.contains(&MacroEvent::KeyUp(0x41)),
                 "recorder harus menyimpan key down dan key up: {recorded:?}"
             );
+            assert!(
+                recorded.contains(&MacroEvent::MouseDown(MouseButton::Left))
+                    && recorded.contains(&MacroEvent::MouseUp(MouseButton::Left))
+                    && recorded.contains(&MacroEvent::Wheel(120)),
+                "recorder harus menyimpan klik mouse dan wheel: {recorded:?}"
+            );
 
             let item = state
                 .macro_library
@@ -4434,6 +4580,39 @@ mod windows_e2e_tests {
             pump_messages_for(Duration::from_millis(150));
             save_window_bmp(main_window, Path::new("qa/vibetimer-macro.bmp"))
                 .expect("snapshot macro dibuat");
+
+            let e2e_macro_path = PathBuf::from("qa/e2e-macros.vtm");
+            let _ = fs::remove_file(&e2e_macro_path);
+            state.macro_path = e2e_macro_path.clone();
+            SetWindowTextW(state.macro_name_edit, wide("Lanjut AI").as_ptr());
+            state.macro_dirty = true;
+            handle_click(state, HitTarget::MacroSave);
+            assert_eq!(state.macro_status_kind, StatusKind::Sent);
+            assert!(!state.macro_dirty);
+            let persisted = load_library(&e2e_macro_path).expect("macro tersimpan dapat dibaca");
+            assert_eq!(
+                persisted.selected().expect("macro tersimpan dipilih").name,
+                "Lanjut AI"
+            );
+            assert_eq!(persisted.macros.len(), 2);
+
+            assert!(keyboard_trigger_matches(MacroTrigger::F8, VK_F8));
+            assert!(keyboard_trigger_matches(MacroTrigger::F9, VK_F9));
+            assert!(mouse_trigger_matches(
+                MacroTrigger::MouseMiddle,
+                WM_MBUTTONDOWN,
+                0
+            ));
+            assert!(mouse_trigger_matches(
+                MacroTrigger::MouseX1,
+                WM_XBUTTONDOWN,
+                (XBUTTON1 as Dword) << 16
+            ));
+            assert!(mouse_trigger_matches(
+                MacroTrigger::MouseX2,
+                WM_XBUTTONDOWN,
+                (XBUTTON2 as Dword) << 16
+            ));
 
             SetForegroundWindow(target_window);
             SetFocus(target_edit);
@@ -4502,6 +4681,63 @@ mod windows_e2e_tests {
                 "macro Mouse 4 harus mengirim Enter ke target"
             );
             assert_eq!(state.macro_status_kind, StatusKind::Sent);
+
+            state
+                .macro_library
+                .selected_mut()
+                .expect("macro middle tersedia")
+                .trigger = MacroTrigger::MouseMiddle;
+            let before_middle_inputs = TEST_MACRO_INPUT_COUNT.load(Ordering::Relaxed);
+            let middle = MsLlHookStruct {
+                point: Point::default(),
+                mouse_data: 0,
+                flags: 0,
+                time: 0,
+                extra_info: 0,
+            };
+            mouse_hook_proc(
+                HC_ACTION,
+                WM_MBUTTONDOWN as Wparam,
+                &middle as *const _ as Lparam,
+            );
+            mouse_hook_proc(
+                HC_ACTION,
+                WM_MBUTTONUP as Wparam,
+                &middle as *const _ as Lparam,
+            );
+            pump_messages_for(Duration::from_millis(180));
+            wait_macro_idle();
+            assert!(
+                TEST_MACRO_INPUT_COUNT.load(Ordering::Relaxed) >= before_middle_inputs + 2,
+                "pemicu Middle harus menjalankan macro"
+            );
+
+            state
+                .macro_library
+                .selected_mut()
+                .expect("macro Mouse 5 tersedia")
+                .trigger = MacroTrigger::MouseX2;
+            let before_mouse5_inputs = TEST_MACRO_INPUT_COUNT.load(Ordering::Relaxed);
+            let mouse5 = MsLlHookStruct {
+                mouse_data: (XBUTTON2 as Dword) << 16,
+                ..middle
+            };
+            mouse_hook_proc(
+                HC_ACTION,
+                WM_XBUTTONDOWN as Wparam,
+                &mouse5 as *const _ as Lparam,
+            );
+            mouse_hook_proc(
+                HC_ACTION,
+                WM_XBUTTONUP as Wparam,
+                &mouse5 as *const _ as Lparam,
+            );
+            pump_messages_for(Duration::from_millis(180));
+            wait_macro_idle();
+            assert!(
+                TEST_MACRO_INPUT_COUNT.load(Ordering::Relaxed) >= before_mouse5_inputs + 2,
+                "pemicu Mouse 5 harus menjalankan macro"
+            );
 
             let item = state
                 .macro_library
@@ -4591,6 +4827,9 @@ mod windows_e2e_tests {
             );
 
             TEST_INPUT_TARGET.store(0, Ordering::Relaxed);
+            let _ = fs::remove_file(&e2e_macro_path);
+            let _ = fs::remove_file(e2e_macro_path.with_extension("vtm.tmp"));
+            let _ = fs::remove_file(e2e_macro_path.with_extension("vtm.bak"));
             DestroyWindow(target_window);
             DestroyWindow(main_window);
         }
