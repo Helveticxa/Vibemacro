@@ -163,17 +163,21 @@ const MAX_RECORDED_EVENTS: usize = 10_000;
 const SWP_NOMOVE: Uint = 0x0002;
 const SWP_NOZORDER: Uint = 0x0004;
 
-const COLOR_BG: u32 = rgb(11, 15, 21);
-const COLOR_SURFACE: u32 = rgb(17, 24, 33);
-const COLOR_SURFACE_2: u32 = rgb(24, 33, 45);
-const COLOR_BORDER: u32 = rgb(39, 52, 68);
-const COLOR_BORDER_HOT: u32 = rgb(95, 75, 165);
-const COLOR_TEXT: u32 = rgb(236, 241, 248);
-const COLOR_MUTED: u32 = rgb(145, 159, 177);
-const COLOR_DIM: u32 = rgb(94, 108, 126);
-const COLOR_ACCENT: u32 = rgb(139, 92, 246);
-const COLOR_ACCENT_HOT: u32 = rgb(154, 112, 248);
-const COLOR_ACCENT_DARK: u32 = rgb(64, 45, 112);
+const COLOR_BG: u32 = rgb(9, 10, 9);
+const COLOR_SURFACE: u32 = rgb(19, 21, 18);
+const COLOR_SURFACE_2: u32 = rgb(29, 32, 27);
+const COLOR_BORDER: u32 = rgb(55, 60, 51);
+const COLOR_BORDER_HOT: u32 = rgb(139, 168, 64);
+const COLOR_TEXT: u32 = rgb(244, 246, 238);
+const COLOR_MUTED: u32 = rgb(157, 163, 149);
+const COLOR_DIM: u32 = rgb(98, 105, 91);
+const COLOR_ACCENT: u32 = rgb(202, 255, 55);
+const COLOR_ACCENT_HOT: u32 = rgb(218, 255, 112);
+const COLOR_ACCENT_DARK: u32 = rgb(42, 55, 15);
+const COLOR_LIGHT: u32 = rgb(242, 244, 235);
+const COLOR_LIGHT_2: u32 = rgb(220, 224, 210);
+const COLOR_INK: u32 = rgb(13, 15, 12);
+const COLOR_INK_MUTED: u32 = rgb(82, 88, 77);
 const COLOR_SUCCESS: u32 = rgb(48, 210, 137);
 const COLOR_WARNING: u32 = rgb(248, 180, 64);
 const COLOR_ERROR: u32 = rgb(244, 91, 105);
@@ -632,6 +636,7 @@ struct AppState {
     prompt_edit: Hwnd,
     macro_name_edit: Hwnd,
     edit_brush: Hbrush,
+    light_edit_brush: Hbrush,
     fonts: Fonts,
     action_mode: ActionMode,
     status_kind: StatusKind,
@@ -683,6 +688,7 @@ impl AppState {
             prompt_edit: 0,
             macro_name_edit: 0,
             edit_brush: 0,
+            light_edit_brush: 0,
             fonts: Fonts::default(),
             action_mode: ActionMode::TextAndEnter,
             status_kind: StatusKind::Ready,
@@ -759,6 +765,9 @@ impl AppState {
             }
             if self.edit_brush != 0 {
                 DeleteObject(self.edit_brush);
+            }
+            if self.light_edit_brush != 0 {
+                DeleteObject(self.light_edit_brush);
             }
             if self.keyboard_hook != 0 {
                 UnhookWindowsHookEx(self.keyboard_hook);
@@ -890,7 +899,7 @@ fn hit_test(x: i32, y: i32, state: &AppState) -> HitTarget {
 }
 
 unsafe fn make_font(size: i32, weight: i32) -> Hgdiobj {
-    let face = wide("Segoe UI");
+    let face = wide("Segoe UI Variable Display");
     unsafe {
         CreateFontW(
             -size,
@@ -1032,7 +1041,7 @@ unsafe fn draw_button(dc: Hdc, rect: Rect, label: &str, selected: bool, hot: boo
         (
             if hot { COLOR_ACCENT_HOT } else { COLOR_ACCENT },
             if hot { COLOR_ACCENT_HOT } else { COLOR_ACCENT },
-            COLOR_TEXT,
+            COLOR_INK,
         )
     } else {
         (
@@ -1058,16 +1067,61 @@ unsafe fn draw_button(dc: Hdc, rect: Rect, label: &str, selected: bool, hot: boo
     }
 }
 
+unsafe fn draw_flat_button(
+    dc: Hdc,
+    rect: Rect,
+    label: &str,
+    fill: u32,
+    text: u32,
+    hot: bool,
+    font: Hgdiobj,
+) {
+    let fill = if hot {
+        if fill == COLOR_ACCENT {
+            COLOR_ACCENT_HOT
+        } else if fill == COLOR_INK {
+            rgb(35, 39, 32)
+        } else {
+            COLOR_LIGHT
+        }
+    } else {
+        fill
+    };
+    unsafe {
+        rounded_box(dc, rect, 14, fill, fill);
+        draw_label(
+            dc,
+            label,
+            rect,
+            text,
+            font,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+        );
+    }
+}
+
+unsafe fn draw_hairline(dc: Hdc, left: i32, top: i32, right: i32, color: u32) {
+    unsafe {
+        let pen = CreatePen(PS_SOLID, 1, color);
+        let old_pen = SelectObject(dc, pen);
+        MoveToEx(dc, left, top, null_mut());
+        LineTo(dc, right, top);
+        SelectObject(dc, old_pen);
+        DeleteObject(pen);
+    }
+}
+
 unsafe fn draw_clock_mark(dc: Hdc) {
     unsafe {
-        let brush = CreateSolidBrush(COLOR_ACCENT_DARK);
-        let pen = CreatePen(PS_SOLID, 2, COLOR_ACCENT);
+        let brush = CreateSolidBrush(COLOR_ACCENT);
+        let pen = CreatePen(PS_SOLID, 2, COLOR_INK);
         let old_brush = SelectObject(dc, brush);
         let old_pen = SelectObject(dc, pen);
-        Ellipse(dc, 25, 24, 51, 50);
-        MoveToEx(dc, 38, 30, null_mut());
-        LineTo(dc, 38, 38);
-        LineTo(dc, 44, 41);
+        RoundRect(dc, 24, 20, 54, 50, 12, 12);
+        Ellipse(dc, 31, 27, 47, 43);
+        MoveToEx(dc, 39, 30, null_mut());
+        LineTo(dc, 39, 36);
+        LineTo(dc, 44, 39);
         SelectObject(dc, old_brush);
         SelectObject(dc, old_pen);
         DeleteObject(brush);
@@ -1082,47 +1136,71 @@ unsafe fn draw_status_pill(dc: Hdc, state: &AppState) {
         state.status_kind
     };
     let (label, dot_color, width) = match kind {
-        StatusKind::Ready => ("SIAP", COLOR_MUTED, 74),
-        StatusKind::Running => ("AKTIF", COLOR_ACCENT, 82),
-        StatusKind::Sent => ("TERKIRIM", COLOR_SUCCESS, 104),
-        StatusKind::Warning => ("PERHATIAN", COLOR_WARNING, 118),
-        StatusKind::Error => ("GAGAL", COLOR_ERROR, 82),
+        StatusKind::Ready => ("Siap", COLOR_MUTED, 58),
+        StatusKind::Running => ("Aktif", COLOR_ACCENT, 62),
+        StatusKind::Sent => ("Selesai", COLOR_SUCCESS, 76),
+        StatusKind::Warning => ("Periksa", COLOR_WARNING, 76),
+        StatusKind::Error => ("Gagal", COLOR_ERROR, 64),
     };
     let right = if state.tab == AppTab::Macro { 936 } else { 496 };
     let rect = Rect::new(right - width, 26, right, 50);
     unsafe {
-        rounded_box(dc, rect, 12, COLOR_SURFACE_2, COLOR_BORDER);
-        let dot = Rect::new(rect.left + 10, 35, rect.left + 16, 41);
+        let dot = Rect::new(rect.left + 5, 35, rect.left + 11, 41);
         filled_circle(dc, dot, dot_color);
         draw_label(
             dc,
             label,
-            Rect::new(rect.left + 21, rect.top, rect.right - 7, rect.bottom),
+            Rect::new(rect.left + 16, rect.top, rect.right, rect.bottom),
             COLOR_MUTED,
             state.fonts.small,
-            DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
         );
     }
 }
 
 unsafe fn draw_tabs(dc: Hdc, state: &AppState) {
     unsafe {
-        draw_button(
-            dc,
-            RECT_TAB_TIMER,
-            "Timer",
-            state.tab == AppTab::Timer,
-            state.hot == HitTarget::TimerTab,
-            state.fonts.small,
-        );
-        draw_button(
-            dc,
-            RECT_TAB_MACRO,
-            "Macro",
-            state.tab == AppTab::Macro,
-            state.hot == HitTarget::MacroTab,
-            state.fonts.small,
-        );
+        for (rect, label, target, active) in [
+            (
+                RECT_TAB_TIMER,
+                "Timer",
+                HitTarget::TimerTab,
+                state.tab == AppTab::Timer,
+            ),
+            (
+                RECT_TAB_MACRO,
+                "Macro",
+                HitTarget::MacroTab,
+                state.tab == AppTab::Macro,
+            ),
+        ] {
+            draw_label(
+                dc,
+                label,
+                Rect::new(rect.left, rect.top - 2, rect.right, rect.bottom - 4),
+                if active || state.hot == target {
+                    COLOR_TEXT
+                } else {
+                    COLOR_MUTED
+                },
+                state.fonts.small,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+            );
+            if active {
+                rounded_box(
+                    dc,
+                    Rect::new(
+                        rect.left + 22,
+                        rect.bottom - 3,
+                        rect.right - 22,
+                        rect.bottom,
+                    ),
+                    3,
+                    COLOR_ACCENT,
+                    COLOR_ACCENT,
+                );
+            }
+        }
     }
 }
 
@@ -1189,6 +1267,640 @@ fn total_delay(events: &[MacroEvent]) -> u64 {
             _ => None,
         })
         .sum()
+}
+
+unsafe fn draw_brand_header_v3(dc: Hdc, state: &AppState) {
+    unsafe {
+        draw_clock_mark(dc);
+        draw_label(
+            dc,
+            "VibeTimer",
+            Rect::new(68, 17, 270, 50),
+            COLOR_TEXT,
+            state.fonts.title,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
+        draw_tabs(dc, state);
+        if state.tab == AppTab::Macro {
+            draw_status_pill(dc, state);
+        }
+    }
+}
+
+unsafe fn draw_timer_interface_v3(dc: Hdc, state: &AppState) {
+    unsafe {
+        fill_rect_color(dc, Rect::new(0, 0, CLIENT_WIDTH, CLIENT_HEIGHT), COLOR_BG);
+        draw_brand_header_v3(dc, state);
+
+        draw_label(
+            dc,
+            if state.running {
+                "Sisa waktu"
+            } else {
+                "Waktu reset"
+            },
+            Rect::new(32, 82, 250, 106),
+            COLOR_ACCENT,
+            state.fonts.small,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
+        draw_label(
+            dc,
+            if state.running {
+                "VibeTimer akan melanjutkan tepat saat nol."
+            } else {
+                "Atur sekali. Lanjut otomatis."
+            },
+            Rect::new(32, 101, 488, 126),
+            COLOR_MUTED,
+            state.fonts.body,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
+
+        if state.running {
+            draw_label(
+                dc,
+                &format_duration(state.remaining_seconds),
+                Rect::new(28, 122, 492, 202),
+                COLOR_TEXT,
+                state.fonts.timer,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+            );
+            let fraction = if state.original_seconds == 0 {
+                0.0
+            } else {
+                1.0 - state.remaining_seconds as f64 / state.original_seconds as f64
+            };
+            rounded_box(
+                dc,
+                Rect::new(32, 218, 488, 224),
+                6,
+                COLOR_SURFACE_2,
+                COLOR_SURFACE_2,
+            );
+            let progress = (456.0 * fraction.clamp(0.0, 1.0)) as i32;
+            if progress > 0 {
+                rounded_box(
+                    dc,
+                    Rect::new(32, 218, 32 + progress.max(6), 224),
+                    6,
+                    COLOR_ACCENT,
+                    COLOR_ACCENT,
+                );
+            }
+            draw_label(
+                dc,
+                "Satu aksi. Tanpa percobaan ulang otomatis.",
+                Rect::new(32, 230, 488, 254),
+                COLOR_DIM,
+                state.fonts.small,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+            );
+        } else {
+            draw_label(
+                dc,
+                ":",
+                Rect::new(158, 128, 194, 180),
+                COLOR_DIM,
+                state.fonts.timer,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+            );
+            draw_label(
+                dc,
+                ":",
+                Rect::new(304, 128, 340, 180),
+                COLOR_DIM,
+                state.fonts.timer,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+            );
+            for (label, rect) in [
+                ("jam", Rect::new(48, 188, 158, 212)),
+                ("menit", Rect::new(194, 188, 304, 212)),
+                ("detik", Rect::new(340, 188, 450, 212)),
+            ] {
+                draw_label(
+                    dc,
+                    label,
+                    rect,
+                    COLOR_DIM,
+                    state.fonts.small,
+                    DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                );
+            }
+            for (rect, label, target) in [
+                (RECT_QUICK_30, "+30 mnt", HitTarget::AddThirtyMinutes),
+                (RECT_QUICK_60, "+1 jam", HitTarget::AddOneHour),
+                (RECT_QUICK_180, "+3 jam", HitTarget::AddThreeHours),
+            ] {
+                draw_flat_button(
+                    dc,
+                    rect,
+                    label,
+                    COLOR_SURFACE_2,
+                    COLOR_TEXT,
+                    state.hot == target,
+                    state.fonts.small,
+                );
+            }
+        }
+
+        let config = Rect::new(24, 286, 496, 526);
+        rounded_box(dc, config, 26, COLOR_LIGHT, COLOR_LIGHT);
+        draw_label(
+            dc,
+            "Target",
+            Rect::new(42, 302, 190, 324),
+            COLOR_INK_MUTED,
+            state.fonts.small,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
+        let target_text = state
+            .target
+            .as_ref()
+            .map(|target| target.title.as_str())
+            .unwrap_or("Belum memilih jendela");
+        draw_label(
+            dc,
+            target_text,
+            Rect::new(42, 323, 344, 350),
+            COLOR_INK,
+            state.fonts.semibold,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+        );
+        draw_label(
+            dc,
+            if state.target.is_some() {
+                "Terverifikasi dengan jendela + proses"
+            } else {
+                "Pilih jendela input AI"
+            },
+            Rect::new(42, 348, 344, 368),
+            COLOR_INK_MUTED,
+            state.fonts.small,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
+        draw_flat_button(
+            dc,
+            RECT_PICK_TARGET,
+            if state.running {
+                "Terkunci"
+            } else {
+                "Pilih target"
+            },
+            COLOR_INK,
+            COLOR_TEXT,
+            state.hot == HitTarget::PickTarget && !state.running,
+            state.fonts.small,
+        );
+        draw_hairline(dc, 42, 383, 478, rgb(196, 200, 188));
+
+        draw_label(
+            dc,
+            "Aksi saat nol",
+            Rect::new(42, 394, 250, 418),
+            COLOR_INK_MUTED,
+            state.fonts.small,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
+        if state.running {
+            let action = match state.action_mode {
+                ActionMode::EnterOnly => "Tekan Enter sekali",
+                ActionMode::TextAndEnter => "Ketik teks, lalu tekan Enter",
+            };
+            draw_label(
+                dc,
+                action,
+                Rect::new(42, 424, 458, 453),
+                COLOR_INK,
+                state.fonts.semibold,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+            );
+            if state.action_mode == ActionMode::TextAndEnter {
+                draw_label(
+                    dc,
+                    &format!("“{}”", state.armed_prompt),
+                    Rect::new(42, 460, 458, 495),
+                    COLOR_INK_MUTED,
+                    state.fonts.body,
+                    DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                );
+            }
+        } else {
+            for (rect, label, active, target) in [
+                (
+                    RECT_MODE_ENTER,
+                    "Hanya Enter",
+                    state.action_mode == ActionMode::EnterOnly,
+                    HitTarget::EnterOnly,
+                ),
+                (
+                    RECT_MODE_TEXT,
+                    "Text + Enter",
+                    state.action_mode == ActionMode::TextAndEnter,
+                    HitTarget::TextAndEnter,
+                ),
+            ] {
+                draw_flat_button(
+                    dc,
+                    rect,
+                    label,
+                    if active { COLOR_ACCENT } else { COLOR_LIGHT_2 },
+                    COLOR_INK,
+                    state.hot == target,
+                    state.fonts.small,
+                );
+            }
+            rounded_box(dc, Rect::new(42, 470, 458, 514), 14, COLOR_INK, COLOR_INK);
+        }
+
+        draw_flat_button(
+            dc,
+            RECT_MAIN_ACTION,
+            if state.running {
+                "Batalkan timer"
+            } else {
+                "Mulai timer  →"
+            },
+            if state.running {
+                COLOR_SURFACE_2
+            } else {
+                COLOR_ACCENT
+            },
+            if state.running { COLOR_TEXT } else { COLOR_INK },
+            state.hot == HitTarget::MainAction,
+            state.fonts.semibold,
+        );
+        let status_color = match state.status_kind {
+            StatusKind::Ready => COLOR_MUTED,
+            StatusKind::Running => COLOR_ACCENT,
+            StatusKind::Sent => COLOR_SUCCESS,
+            StatusKind::Warning => COLOR_WARNING,
+            StatusKind::Error => COLOR_ERROR,
+        };
+        filled_circle(dc, Rect::new(28, 622, 36, 630), status_color);
+        draw_label(
+            dc,
+            &state.status,
+            Rect::new(46, 610, 492, 642),
+            COLOR_MUTED,
+            state.fonts.small,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+        );
+    }
+}
+
+unsafe fn draw_macro_interface_v3(dc: Hdc, state: &AppState) {
+    unsafe {
+        fill_rect_color(
+            dc,
+            Rect::new(0, 0, MACRO_CLIENT_WIDTH, CLIENT_HEIGHT),
+            COLOR_BG,
+        );
+        draw_brand_header_v3(dc, state);
+
+        let library_panel = Rect::new(24, 84, 236, 608);
+        rounded_box(dc, library_panel, 24, COLOR_ACCENT, COLOR_ACCENT);
+        draw_label(
+            dc,
+            &format!("MACRO  /  {:02}", state.macro_library.macros.len()),
+            Rect::new(42, 90, 218, 113),
+            COLOR_INK_MUTED,
+            state.fonts.small,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
+        draw_flat_button(
+            dc,
+            RECT_MACRO_NEW,
+            "+  Macro baru",
+            COLOR_INK,
+            COLOR_TEXT,
+            state.hot == HitTarget::MacroNew,
+            state.fonts.small,
+        );
+        for (index, item) in state.macro_library.macros.iter().take(7).enumerate() {
+            let rect = macro_item_rect(index);
+            let selected = item.id == state.macro_library.selected_id;
+            if selected {
+                rounded_box(dc, rect, 14, COLOR_INK, COLOR_INK);
+            } else if index > 0 {
+                draw_hairline(
+                    dc,
+                    rect.left + 8,
+                    rect.top,
+                    rect.right - 8,
+                    rgb(167, 207, 52),
+                );
+            }
+            draw_label(
+                dc,
+                &item.name,
+                Rect::new(rect.left + 14, rect.top + 5, rect.right - 10, rect.top + 29),
+                if selected { COLOR_TEXT } else { COLOR_INK },
+                state.fonts.semibold,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+            );
+            draw_label(
+                dc,
+                item.trigger.label(),
+                Rect::new(
+                    rect.left + 14,
+                    rect.top + 27,
+                    rect.right - 10,
+                    rect.bottom - 2,
+                ),
+                if selected {
+                    COLOR_ACCENT
+                } else {
+                    COLOR_INK_MUTED
+                },
+                state.fonts.small,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+            );
+        }
+
+        let editor_panel = Rect::new(252, 84, 936, 608);
+        rounded_box(dc, editor_panel, 24, COLOR_LIGHT, COLOR_LIGHT);
+        draw_label(
+            dc,
+            if state.recording {
+                "Merekam input"
+            } else {
+                "Editor macro"
+            },
+            Rect::new(278, 96, 500, 119),
+            if state.recording {
+                COLOR_ERROR
+            } else {
+                COLOR_INK_MUTED
+            },
+            state.fonts.small,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
+        if state.recording {
+            draw_label(
+                dc,
+                "Tekan Esc untuk selesai",
+                Rect::new(680, 96, 910, 119),
+                COLOR_ERROR,
+                state.fonts.small,
+                DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
+            );
+        }
+        let Some(item) = state.macro_library.selected() else {
+            return;
+        };
+        rounded_box(
+            dc,
+            Rect::new(270, 121, 916, 162),
+            13,
+            COLOR_LIGHT_2,
+            COLOR_LIGHT_2,
+        );
+
+        draw_label(
+            dc,
+            "Perilaku",
+            Rect::new(278, 151, 480, 177),
+            COLOR_INK_MUTED,
+            state.fonts.small,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
+        for (index, (mode, rect)) in [
+            (MacroMode::NoRepeat, RECT_MACRO_MODE_NO_REPEAT),
+            (MacroMode::RepeatWhileHolding, RECT_MACRO_MODE_HOLD),
+            (MacroMode::Toggle, RECT_MACRO_MODE_TOGGLE),
+            (MacroMode::Sequence, RECT_MACRO_MODE_SEQUENCE),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let selected = item.mode == mode;
+            let hot = state.hot == HitTarget::MacroMode(mode);
+            rounded_box(
+                dc,
+                rect,
+                15,
+                if selected {
+                    COLOR_INK
+                } else if hot {
+                    rgb(231, 234, 223)
+                } else {
+                    COLOR_LIGHT_2
+                },
+                if selected {
+                    COLOR_INK
+                } else if hot {
+                    COLOR_BORDER_HOT
+                } else {
+                    COLOR_LIGHT_2
+                },
+            );
+            draw_label(
+                dc,
+                &format!("0{}", index + 1),
+                Rect::new(rect.left + 12, rect.top + 5, rect.right - 10, rect.top + 25),
+                if selected {
+                    COLOR_ACCENT
+                } else {
+                    COLOR_INK_MUTED
+                },
+                state.fonts.small,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+            );
+            draw_label(
+                dc,
+                mode.label(),
+                Rect::new(
+                    rect.left + 12,
+                    rect.top + 26,
+                    rect.right - 10,
+                    rect.bottom - 7,
+                ),
+                if selected { COLOR_TEXT } else { COLOR_INK },
+                state.fonts.semibold,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+            );
+        }
+
+        draw_label(
+            dc,
+            "Pemicu",
+            Rect::new(278, 245, 500, 269),
+            COLOR_INK_MUTED,
+            state.fonts.small,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
+        for (index, trigger) in MacroTrigger::ALL.into_iter().enumerate() {
+            let active = item.trigger == trigger;
+            draw_flat_button(
+                dc,
+                macro_trigger_rect(index),
+                trigger.label(),
+                if active { COLOR_INK } else { COLOR_LIGHT_2 },
+                if active { COLOR_ACCENT } else { COLOR_INK },
+                state.hot == HitTarget::MacroTrigger(trigger),
+                state.fonts.small,
+            );
+        }
+
+        draw_label(
+            dc,
+            "Timeline",
+            Rect::new(278, 310, 500, 334),
+            COLOR_INK_MUTED,
+            state.fonts.small,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
+        for (lane, rect, label) in [
+            (MacroLane::OnPress, RECT_MACRO_LANE_PRESS, "Saat ditekan"),
+            (
+                MacroLane::WhileHolding,
+                RECT_MACRO_LANE_HOLD,
+                "Saat ditahan",
+            ),
+            (
+                MacroLane::OnRelease,
+                RECT_MACRO_LANE_RELEASE,
+                "Saat dilepas",
+            ),
+        ] {
+            let active = state.macro_lane == lane;
+            draw_flat_button(
+                dc,
+                rect,
+                label,
+                if active { COLOR_INK } else { COLOR_LIGHT_2 },
+                if active { COLOR_ACCENT } else { COLOR_INK },
+                state.hot == HitTarget::MacroLane(lane),
+                state.fonts.small,
+            );
+        }
+        let events = lane_events(item, state.macro_lane);
+        draw_label(
+            dc,
+            &format!("{} langkah  ·  {} ms", events.len(), total_delay(events)),
+            Rect::new(735, 331, 908, 365),
+            COLOR_INK_MUTED,
+            state.fonts.small,
+            DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
+        );
+
+        let timeline = Rect::new(278, 375, 912, 532);
+        rounded_box(dc, timeline, 18, COLOR_INK, COLOR_INK);
+        for y in [409, 443, 477, 511] {
+            draw_hairline(dc, 296, y, 894, rgb(31, 35, 29));
+        }
+        if events.is_empty() {
+            filled_circle(dc, Rect::new(300, 414, 316, 430), COLOR_ACCENT);
+            draw_label(
+                dc,
+                "Belum ada rekaman",
+                Rect::new(330, 399, 690, 433),
+                COLOR_TEXT,
+                state.fonts.semibold,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+            );
+            draw_label(
+                dc,
+                "Rekam input untuk menyusun bagian ini.",
+                Rect::new(330, 430, 720, 458),
+                COLOR_MUTED,
+                state.fonts.body,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+            );
+        } else {
+            for (index, event) in events.iter().take(18).enumerate() {
+                let column = index % 6;
+                let row = index / 6;
+                let left = 292 + column as i32 * 100;
+                let top = 390 + row as i32 * 40;
+                let is_delay = matches!(event, MacroEvent::Delay(_));
+                draw_flat_button(
+                    dc,
+                    Rect::new(left, top, left + 90, top + 30),
+                    &macro_event_label(event),
+                    if is_delay {
+                        COLOR_ACCENT
+                    } else {
+                        COLOR_SURFACE_2
+                    },
+                    if is_delay { COLOR_INK } else { COLOR_TEXT },
+                    false,
+                    state.fonts.small,
+                );
+            }
+            if events.len() > 18 {
+                draw_label(
+                    dc,
+                    &format!("+{} lainnya", events.len() - 18),
+                    Rect::new(760, 495, 896, 520),
+                    COLOR_MUTED,
+                    state.fonts.small,
+                    DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
+                );
+            }
+        }
+
+        draw_flat_button(
+            dc,
+            RECT_MACRO_RECORD,
+            if state.recording {
+                "Selesai merekam"
+            } else {
+                "●  Rekam input"
+            },
+            COLOR_ACCENT,
+            COLOR_INK,
+            state.hot == HitTarget::MacroRecord,
+            state.fonts.semibold,
+        );
+        draw_flat_button(
+            dc,
+            RECT_MACRO_CLEAR,
+            "Bersihkan bagian",
+            COLOR_LIGHT_2,
+            COLOR_INK,
+            state.hot == HitTarget::MacroClear,
+            state.fonts.small,
+        );
+        draw_flat_button(
+            dc,
+            RECT_MACRO_SAVE,
+            if state.macro_dirty {
+                "Simpan"
+            } else {
+                "Tersimpan"
+            },
+            COLOR_INK,
+            COLOR_TEXT,
+            state.hot == HitTarget::MacroSave,
+            state.fonts.semibold,
+        );
+
+        let status_color = match state.macro_status_kind {
+            StatusKind::Ready => COLOR_MUTED,
+            StatusKind::Running => COLOR_ACCENT,
+            StatusKind::Sent => COLOR_SUCCESS,
+            StatusKind::Warning => COLOR_WARNING,
+            StatusKind::Error => COLOR_ERROR,
+        };
+        filled_circle(dc, Rect::new(260, 622, 268, 630), status_color);
+        draw_label(
+            dc,
+            &state.macro_status,
+            Rect::new(278, 610, 930, 642),
+            COLOR_MUTED,
+            state.fonts.small,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+        );
+    }
+}
+
+unsafe fn draw_redesigned_interface(dc: Hdc, state: &AppState) {
+    match state.tab {
+        AppTab::Timer => unsafe { draw_timer_interface_v3(dc, state) },
+        AppTab::Macro => unsafe { draw_macro_interface_v3(dc, state) },
+    }
 }
 
 unsafe fn draw_macro_interface(dc: Hdc, state: &AppState) {
@@ -1568,6 +2280,7 @@ unsafe fn draw_macro_interface(dc: Hdc, state: &AppState) {
     }
 }
 
+#[allow(dead_code)]
 unsafe fn draw_interface(dc: Hdc, state: &AppState) {
     if state.tab == AppTab::Macro {
         unsafe { draw_macro_interface(dc, state) };
@@ -1882,12 +2595,13 @@ unsafe fn create_edit(parent: Hwnd, instance: Hinstance, spec: EditSpec<'_>) -> 
 
 unsafe fn initialize_controls(state: &mut AppState, instance: Hinstance) {
     unsafe {
-        state.fonts.title = make_font(23, 700);
-        state.fonts.timer = make_font(38, 600);
-        state.fonts.body = make_font(17, 400);
-        state.fonts.semibold = make_font(16, 600);
+        state.fonts.title = make_font(24, 750);
+        state.fonts.timer = make_font(46, 650);
+        state.fonts.body = make_font(17, 450);
+        state.fonts.semibold = make_font(16, 650);
         state.fonts.small = make_font(13, 600);
-        state.edit_brush = CreateSolidBrush(COLOR_SURFACE_2);
+        state.edit_brush = CreateSolidBrush(COLOR_BG);
+        state.light_edit_brush = CreateSolidBrush(COLOR_LIGHT_2);
 
         state.hour_edit = create_edit(
             state.window,
@@ -3116,7 +3830,7 @@ unsafe extern "system" fn window_proc(
             let bitmap = unsafe { CreateCompatibleBitmap(destination, width, height) };
             let old_bitmap = unsafe { SelectObject(memory_dc, bitmap) };
             unsafe {
-                draw_interface(memory_dc, state);
+                draw_redesigned_interface(memory_dc, state);
                 BitBlt(destination, 0, 0, width, height, memory_dc, 0, 0, SRCCOPY);
                 SelectObject(memory_dc, old_bitmap);
                 DeleteObject(bitmap);
@@ -3128,18 +3842,34 @@ unsafe extern "system" fn window_proc(
         WM_ERASEBKGND => 1,
         WM_CTLCOLOREDIT | WM_CTLCOLORSTATIC => {
             let dc = wparam as Hdc;
+            let light_editor = lparam == state.macro_name_edit;
             unsafe {
                 SetTextColor(
                     dc,
-                    if state.action_mode == ActionMode::EnterOnly && lparam == state.prompt_edit {
+                    if light_editor {
+                        COLOR_INK
+                    } else if state.action_mode == ActionMode::EnterOnly
+                        && lparam == state.prompt_edit
+                    {
                         COLOR_DIM
                     } else {
                         COLOR_TEXT
                     },
                 );
-                SetBkColor(dc, COLOR_SURFACE_2);
+                SetBkColor(
+                    dc,
+                    if light_editor {
+                        COLOR_LIGHT_2
+                    } else {
+                        COLOR_BG
+                    },
+                );
             }
-            state.edit_brush
+            if light_editor {
+                state.light_edit_brush
+            } else {
+                state.edit_brush
+            }
         }
         WM_MOUSEMOVE => {
             let x = low_word(lparam);
@@ -3637,6 +4367,11 @@ mod windows_e2e_tests {
                 .expect("macro default tersedia")
                 .on_press
                 .clear();
+            InvalidateRect(main_window, null(), FALSE);
+            UpdateWindow(main_window);
+            pump_messages_for(Duration::from_millis(120));
+            save_window_bmp(main_window, Path::new("qa/vibetimer-macro-empty.bmp"))
+                .expect("snapshot macro kosong dibuat");
             start_macro_recording(state);
             assert!(state.recording);
             let recorded_key = KbdLlHookStruct {

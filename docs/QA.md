@@ -11,9 +11,9 @@ Platform build: Windows x64, Rust 1.97.1
 | `cargo clippy --all-targets -- -D warnings` | Lulus, 0 warning |
 | `cargo test` | Lulus, 9 test (8 unit + 1 integration E2E) |
 | `cargo build --release` | Lulus |
-| Ukuran `VibeTimer.exe` | 196.608 byte (192 KB) |
+| Ukuran `VibeTimer.exe` | 197.632 byte (193 KB) |
 | Working set setelah startup | 7,27 MB |
-| Private memory setelah startup | 1,22 MB |
+| Private memory setelah startup | 1,21 MB |
 | Handle setelah startup | 87 |
 
 ## Cakupan test
@@ -27,15 +27,28 @@ Esc, lalu memicu macro No Repeat melalui F8 dan Mouse 4 serta memverifikasi Ente
 diterima target. Controller Repeat While Holding, Toggle, dan ketiga lane
 Sequence juga dijalankan dengan assertion jumlah input playback.
 
-Integration test juga menangkap empat artefak lokal di folder `qa/`:
+Integration test juga menangkap lima artefak lokal di folder `qa/`:
 
 - `vibetimer-idle.bmp`
 - `vibetimer-running.bmp`
 - `e2e-target.bmp`
 - `vibetimer-macro.bmp`
+- `vibetimer-macro-empty.bmp`
 
 Folder tersebut sengaja diabaikan Git karena merupakan hasil test yang dapat
 dibuat ulang.
+
+## QA visual 0.2.1
+
+Snapshot idle, running, Macro berisi event, dan Macro empty-state dirender lewat
+`PrintWindow` dari aplikasi native yang sama, lalu diinspeksi pada resolusi asli.
+Redesign menggunakan satu bahasa visual: background hitam hangat, kartu kerja
+ivory, acid-lime sebagai aksen interaksi, Segoe UI Variable Display, tab berbasis
+teks, serta pengurangan border dan nested-card. Tidak ada image asset yang
+dibakar ke UI; seluruh visual tetap GDI programatik.
+
+SHA-256 release 0.2.1:
+`A5DEDA430080D4F0C7EDF35CE7E3066E6CD8AEDD755F6D175F2415D565207CC3`.
 
 ## Batas verifikasi sandbox
 

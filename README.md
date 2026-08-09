@@ -10,6 +10,10 @@ memberi fungsi macro bergaya Logitech G HUB pada mouse HID umum, tanpa
 memerlukan perangkat atau driver Logitech. UI dan branding tetap milik
 VibeTimer; tidak ada aset atau logo Logitech yang disalin.
 
+Versi 0.2.1 merombak visual menjadi studio utility yang lebih editorial: shell
+hitam hangat, kanvas ivory, aksen acid-lime, navigasi tanpa pill berlebihan, dan
+hierarki yang berbeda jelas antara Timer dan Macro Editor.
+
 ## Kenapa Rust + Win32 native
 
 - Tidak memakai Electron, WebView2, Tauri, atau runtime tambahan.
