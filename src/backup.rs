@@ -7,6 +7,7 @@ use std::path::Path;
 use crate::macro_engine::{MacroLibrary, decode_library, encode_library};
 use crate::profiles::{ProfileLibrary, decode_profiles, encode_profiles};
 use crate::settings::{AppSettings, decode_settings, encode_settings, save_atomic};
+use crate::timers::{TimerLibrary, decode_timers, encode_timers};
 
 const MAGIC: &[u8; 4] = b"VTB1";
 const VERSION: u16 = 1;
@@ -18,6 +19,7 @@ pub struct BackupBundle {
     pub macros: MacroLibrary,
     pub profiles: ProfileLibrary,
     pub settings: AppSettings,
+    pub timers: TimerLibrary,
 }
 
 impl BackupBundle {
@@ -26,6 +28,21 @@ impl BackupBundle {
             macros,
             profiles,
             settings,
+            timers: TimerLibrary::default(),
+        }
+    }
+
+    pub fn with_timers(
+        macros: MacroLibrary,
+        profiles: ProfileLibrary,
+        settings: AppSettings,
+        timers: TimerLibrary,
+    ) -> Self {
+        Self {
+            macros,
+            profiles,
+            settings,
+            timers,
         }
     }
 }
@@ -44,6 +61,7 @@ pub fn encode_backup(bundle: &BackupBundle) -> io::Result<Vec<u8>> {
         (*b"MACR", encode_library(&bundle.macros)?),
         (*b"PROF", encode_profiles(&bundle.profiles)?),
         (*b"SETT", encode_settings(&bundle.settings)),
+        (*b"TIMR", encode_timers(&bundle.timers)?),
     ];
     let mut out = Vec::new();
     out.extend_from_slice(MAGIC);
@@ -79,6 +97,7 @@ pub fn decode_backup(bytes: &[u8]) -> Result<BackupBundle, &'static str> {
     let mut macros = None;
     let mut profiles = None;
     let mut settings = None;
+    let mut timers = None;
     for _ in 0..count {
         let tag: [u8; 4] = reader
             .take(4)?
@@ -97,6 +116,9 @@ pub fn decode_backup(bytes: &[u8]) -> Result<BackupBundle, &'static str> {
             b"MACR" if macros.is_none() => macros = Some(decode_library(data)?),
             b"PROF" if profiles.is_none() => profiles = Some(decode_profiles(data)?),
             b"SETT" if settings.is_none() => settings = Some(decode_settings(data)?),
+            b"TIMR" if timers.is_none() => {
+                timers = Some(decode_timers(data).map_err(|_| "Bagian timer backup rusak.")?)
+            }
             _ => {}
         }
     }
@@ -107,6 +129,7 @@ pub fn decode_backup(bytes: &[u8]) -> Result<BackupBundle, &'static str> {
         macros: macros.ok_or("Backup tidak memiliki library macro.")?,
         profiles: profiles.unwrap_or_default(),
         settings: settings.unwrap_or_default(),
+        timers: timers.unwrap_or_default(),
     })
 }
 

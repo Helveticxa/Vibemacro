@@ -24,6 +24,11 @@ use vibe_timer_core::profiles::{
 use vibe_timer_core::settings::{
     AppSettings, EmergencyHotkey, default_settings_path, load_settings, save_settings,
 };
+use vibe_timer_core::smart_reset::{ClockContext, parse_reset_text};
+use vibe_timer_core::timers::{
+    TimerAction, TimerLibrary, TimerPhase, default_timers_path, load_timers, now_unix_ms,
+    save_timers,
+};
 use vibe_timer_core::{DurationFields, format_duration};
 
 type Bool = i32;
@@ -186,6 +191,7 @@ const OFN_OVERWRITEPROMPT: Dword = 0x0000_0002;
 const OFN_PATHMUSTEXIST: Dword = 0x0000_0800;
 const OFN_FILEMUSTEXIST: Dword = 0x0000_1000;
 const OFN_EXPLORER: Dword = 0x0008_0000;
+const CF_UNICODETEXT: Uint = 13;
 #[cfg(test)]
 const ES_MULTILINE: Dword = 0x0004;
 #[cfg(test)]
@@ -207,7 +213,7 @@ const DWMWCP_ROUND: Dword = 2;
 const ICON_SMALL: Wparam = 0;
 const ICON_BIG: Wparam = 1;
 
-const CLIENT_WIDTH: i32 = 520;
+const CLIENT_WIDTH: i32 = 900;
 const MACRO_CLIENT_WIDTH: i32 = 1120;
 const SETTINGS_CLIENT_WIDTH: i32 = 820;
 const PROFILES_CLIENT_WIDTH: i32 = 900;
@@ -259,6 +265,19 @@ const fn rgb(red: u8, green: u8, blue: u8) -> u32 {
 struct Point {
     x: i32,
     y: i32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct SystemTimeW {
+    year: u16,
+    month: u16,
+    day_of_week: u16,
+    day: u16,
+    hour: u16,
+    minute: u16,
+    second: u16,
+    milliseconds: u16,
 }
 
 #[repr(C)]
@@ -578,6 +597,10 @@ unsafe extern "system" {
     fn PostMessageW(window: Hwnd, message: Uint, wparam: Wparam, lparam: Lparam) -> Bool;
     fn RegisterHotKey(window: Hwnd, id: i32, modifiers: Uint, virtual_key: Uint) -> Bool;
     fn UnregisterHotKey(window: Hwnd, id: i32) -> Bool;
+    fn OpenClipboard(window: Hwnd) -> Bool;
+    fn CloseClipboard() -> Bool;
+    fn IsClipboardFormatAvailable(format: Uint) -> Bool;
+    fn GetClipboardData(format: Uint) -> isize;
     fn CreatePopupMenu() -> Hmenu;
     fn AppendMenuW(menu: Hmenu, flags: Uint, id: usize, text: *const u16) -> Bool;
     fn TrackPopupMenu(
@@ -655,6 +678,9 @@ unsafe extern "system" {
         size: *mut Dword,
     ) -> Bool;
     fn CloseHandle(handle: isize) -> Bool;
+    fn GlobalLock(memory: isize) -> *mut c_void;
+    fn GlobalUnlock(memory: isize) -> Bool;
+    fn GetLocalTime(time: *mut SystemTimeW);
 }
 
 #[link(name = "gdi32")]
@@ -787,6 +813,13 @@ enum HitTarget {
     AddThirtyMinutes,
     AddOneHour,
     AddThreeHours,
+    TimerNew,
+    TimerItem(usize),
+    TimerDuplicate,
+    TimerDelete,
+    TimerSave,
+    SmartResetClipboard,
+    SmartResetApply,
     PickTarget,
     EnterOnly,
     TextAndEnter,
@@ -838,6 +871,7 @@ struct TargetWindow {
     window: Hwnd,
     process_id: Dword,
     title: String,
+    executable: String,
 }
 
 #[derive(Clone)]
@@ -873,6 +907,8 @@ struct AppState {
     macro_name_edit: Hwnd,
     macro_delay_edit: Hwnd,
     profile_name_edit: Hwnd,
+    timer_name_edit: Hwnd,
+    smart_reset_edit: Hwnd,
     edit_brush: Hbrush,
     panel_edit_brush: Hbrush,
     fonts: Fonts,
@@ -881,12 +917,15 @@ struct AppState {
     status: String,
     target: Option<TargetWindow>,
     running: bool,
-    deadline: Option<Instant>,
     capture_deadline: Option<Instant>,
     capture_kind: CaptureKind,
     original_seconds: u64,
     remaining_seconds: u64,
     armed_prompt: String,
+    timer_library: TimerLibrary,
+    timers_path: PathBuf,
+    timer_targets: HashMap<u32, TargetWindow>,
+    timer_dirty: bool,
     hot: HitTarget,
     tracking_mouse: bool,
     macro_library: MacroLibrary,
@@ -964,6 +1003,40 @@ impl AppState {
             };
         let macro_ids: Vec<u32> = macro_library.macros.iter().map(|item| item.id).collect();
         profile_library.remove_missing_macro_links(&macro_ids);
+        let timers_path = default_timers_path();
+        let (mut timer_library, mut timer_status_kind, mut timer_status) =
+            match load_timers(&timers_path) {
+                Ok(library) => (
+                    library,
+                    StatusKind::Ready,
+                    "Multi Timer siap. Pilih target untuk mulai.".to_owned(),
+                ),
+                Err(error) => (
+                    TimerLibrary::default(),
+                    StatusKind::Warning,
+                    format!("File timer tidak dapat dibaca: {error}"),
+                ),
+            };
+        let missed = timer_library.recover_after_restart(now_unix_ms());
+        if missed > 0 {
+            timer_status_kind = StatusKind::Warning;
+            timer_status = format!(
+                "{missed} timer terlewat saat aplikasi tertutup; tidak ada input yang dikirim."
+            );
+            if let Err(error) = save_timers(&timers_path, &timer_library) {
+                timer_status = format!("{timer_status} Status aman gagal disimpan: {error}");
+            }
+        } else if timer_library.running_count() > 0 {
+            timer_status_kind = StatusKind::Running;
+            timer_status = format!(
+                "{} timer dipulihkan dan tetap berjalan.",
+                timer_library.running_count()
+            );
+        }
+        let selected_timer = timer_library
+            .selected()
+            .cloned()
+            .unwrap_or_else(|| TimerLibrary::default().timers.into_iter().next().unwrap());
         Self {
             window: 0,
             tab: AppTab::Timer,
@@ -974,20 +1047,28 @@ impl AppState {
             macro_name_edit: 0,
             macro_delay_edit: 0,
             profile_name_edit: 0,
+            timer_name_edit: 0,
+            smart_reset_edit: 0,
             edit_brush: 0,
             panel_edit_brush: 0,
             fonts: Fonts::default(),
-            action_mode: ActionMode::TextAndEnter,
-            status_kind: StatusKind::Ready,
-            status: "Pilih jendela AI untuk mulai.".to_owned(),
+            action_mode: match selected_timer.action {
+                TimerAction::EnterOnly => ActionMode::EnterOnly,
+                TimerAction::TextAndEnter => ActionMode::TextAndEnter,
+            },
+            status_kind: timer_status_kind,
+            status: timer_status,
             target: None,
-            running: false,
-            deadline: None,
+            running: selected_timer.is_running(),
             capture_deadline: None,
             capture_kind: CaptureKind::Timer,
-            original_seconds: 0,
-            remaining_seconds: 0,
-            armed_prompt: String::new(),
+            original_seconds: selected_timer.duration_seconds,
+            remaining_seconds: selected_timer.remaining_seconds,
+            armed_prompt: selected_timer.prompt.clone(),
+            timer_library,
+            timers_path,
+            timer_targets: HashMap::new(),
+            timer_dirty: false,
             hot: HitTarget::None,
             tracking_mouse: false,
             macro_library,
@@ -1056,6 +1137,22 @@ impl AppState {
                     SW_HIDE
                 },
             );
+            ShowWindow(
+                self.timer_name_edit,
+                if self.tab == AppTab::Timer {
+                    SW_SHOWNORMAL
+                } else {
+                    SW_HIDE
+                },
+            );
+            ShowWindow(
+                self.smart_reset_edit,
+                if self.tab == AppTab::Timer && !self.running {
+                    SW_SHOWNORMAL
+                } else {
+                    SW_HIDE
+                },
+            );
         }
     }
 
@@ -1072,6 +1169,14 @@ impl AppState {
                 if !self.recording { TRUE } else { FALSE },
             );
             EnableWindow(self.profile_name_edit, TRUE);
+            EnableWindow(
+                self.timer_name_edit,
+                if self.running { FALSE } else { TRUE },
+            );
+            EnableWindow(
+                self.smart_reset_edit,
+                if self.running { FALSE } else { TRUE },
+            );
         }
     }
 
@@ -1117,6 +1222,12 @@ const RECT_PICK_TARGET: Rect = Rect::new(358, 309, 474, 351);
 const RECT_MODE_ENTER: Rect = Rect::new(42, 424, 249, 462);
 const RECT_MODE_TEXT: Rect = Rect::new(251, 424, 458, 462);
 const RECT_MAIN_ACTION: Rect = Rect::new(24, 548, 496, 604);
+const RECT_TIMER_NEW: Rect = Rect::new(520, 117, 646, 157);
+const RECT_TIMER_DUPLICATE: Rect = Rect::new(520, 510, 632, 548);
+const RECT_TIMER_DELETE: Rect = Rect::new(640, 510, 752, 548);
+const RECT_TIMER_SAVE: Rect = Rect::new(760, 510, 876, 548);
+const RECT_SMART_CLIPBOARD: Rect = Rect::new(520, 614, 694, 642);
+const RECT_SMART_APPLY: Rect = Rect::new(702, 614, 876, 642);
 const RECT_TAB_TIMER: Rect = Rect::new(202, 24, 258, 54);
 const RECT_TAB_MACRO: Rect = Rect::new(262, 24, 322, 54);
 const RECT_TAB_PROFILES: Rect = Rect::new(326, 24, 402, 54);
@@ -1192,6 +1303,11 @@ fn profile_macro_rect(index: usize) -> Rect {
     let left = 278 + column as i32 * 286;
     let top = 340 + row as i32 * 58;
     Rect::new(left, top, left + 272, top + 48)
+}
+
+fn timer_item_rect(index: usize) -> Rect {
+    let top = 170 + index as i32 * 56;
+    Rect::new(520, top, 876, top + 48)
 }
 
 fn macro_event_rect(index: usize) -> Rect {
@@ -1398,6 +1514,27 @@ fn hit_test(x: i32, y: i32, state: &AppState) -> HitTarget {
             return HitTarget::MacroSave;
         }
         return HitTarget::None;
+    }
+    if state.tab == AppTab::Timer {
+        if RECT_TIMER_NEW.contains(x, y) {
+            return HitTarget::TimerNew;
+        }
+        for (index, _) in state.timer_library.timers.iter().enumerate() {
+            if timer_item_rect(index).contains(x, y) {
+                return HitTarget::TimerItem(index);
+            }
+        }
+        for (rect, target) in [
+            (RECT_TIMER_DUPLICATE, HitTarget::TimerDuplicate),
+            (RECT_TIMER_DELETE, HitTarget::TimerDelete),
+            (RECT_TIMER_SAVE, HitTarget::TimerSave),
+            (RECT_SMART_CLIPBOARD, HitTarget::SmartResetClipboard),
+            (RECT_SMART_APPLY, HitTarget::SmartResetApply),
+        ] {
+            if rect.contains(x, y) {
+                return target;
+            }
+        }
     }
     if RECT_MAIN_ACTION.contains(x, y) {
         return HitTarget::MainAction;
@@ -2032,10 +2169,15 @@ unsafe fn draw_timer_interface_v3(dc: Hdc, state: &AppState) {
             state.fonts.small,
             DT_LEFT | DT_VCENTER | DT_SINGLELINE,
         );
+        let stored_target = state
+            .timer_library
+            .selected()
+            .and_then(|timer| timer.target.as_ref());
         let target_text = state
             .target
             .as_ref()
             .map(|target| target.title.as_str())
+            .or_else(|| stored_target.map(|target| target.window_title.as_str()))
             .unwrap_or("Belum memilih jendela");
         draw_label(
             dc,
@@ -2049,6 +2191,8 @@ unsafe fn draw_timer_interface_v3(dc: Hdc, state: &AppState) {
             dc,
             if state.target.is_some() {
                 "Terverifikasi dengan jendela + proses"
+            } else if stored_target.is_some() {
+                "Target tersimpan; diverifikasi ulang saat nol"
             } else {
                 "Pilih jendela input AI"
             },
@@ -2148,6 +2292,7 @@ unsafe fn draw_timer_interface_v3(dc: Hdc, state: &AppState) {
             state.hot == HitTarget::MainAction,
             state.fonts.semibold,
         );
+        draw_timer_sidebar(dc, state);
         let status_color = match state.status_kind {
             StatusKind::Ready => COLOR_MUTED,
             StatusKind::Running => COLOR_ACCENT,
@@ -2163,6 +2308,184 @@ unsafe fn draw_timer_interface_v3(dc: Hdc, state: &AppState) {
             COLOR_MUTED,
             state.fonts.small,
             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+        );
+    }
+}
+
+unsafe fn draw_timer_sidebar(dc: Hdc, state: &AppState) {
+    unsafe {
+        rounded_box(
+            dc,
+            Rect::new(508, 84, 888, 648),
+            24,
+            COLOR_PANEL,
+            COLOR_PANEL_BORDER,
+        );
+        draw_label(
+            dc,
+            &format!(
+                "MULTI TIMER  /  {} AKTIF",
+                state.timer_library.running_count()
+            ),
+            Rect::new(520, 90, 876, 112),
+            COLOR_ACCENT,
+            state.fonts.small,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
+        draw_flat_button(
+            dc,
+            RECT_TIMER_NEW,
+            "+ Timer",
+            COLOR_ACCENT,
+            COLOR_INK,
+            state.hot == HitTarget::TimerNew,
+            state.fonts.small,
+        );
+        rounded_box(
+            dc,
+            Rect::new(654, 117, 876, 157),
+            12,
+            COLOR_PANEL_2,
+            COLOR_PANEL_BORDER,
+        );
+
+        for (index, timer) in state.timer_library.timers.iter().enumerate() {
+            let rect = timer_item_rect(index);
+            let selected = timer.id == state.timer_library.selected_id;
+            draw_flat_button(
+                dc,
+                rect,
+                "",
+                if selected {
+                    COLOR_ACCENT
+                } else {
+                    COLOR_PANEL_2
+                },
+                if selected { COLOR_INK } else { COLOR_TEXT },
+                state.hot == HitTarget::TimerItem(index),
+                state.fonts.small,
+            );
+            draw_label(
+                dc,
+                &timer.name,
+                Rect::new(
+                    rect.left + 14,
+                    rect.top + 4,
+                    rect.right - 112,
+                    rect.top + 27,
+                ),
+                if selected { COLOR_INK } else { COLOR_TEXT },
+                state.fonts.semibold,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+            );
+            let detail = if timer.is_running() {
+                format_duration(timer.remaining_seconds)
+            } else {
+                timer.phase.label().to_owned()
+            };
+            draw_label(
+                dc,
+                &detail,
+                Rect::new(
+                    rect.right - 106,
+                    rect.top + 4,
+                    rect.right - 14,
+                    rect.top + 27,
+                ),
+                if timer.is_running() {
+                    if selected { COLOR_INK } else { COLOR_ACCENT }
+                } else if selected {
+                    COLOR_INK_MUTED
+                } else {
+                    COLOR_MUTED
+                },
+                state.fonts.small,
+                DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+            );
+            let target = timer
+                .target
+                .as_ref()
+                .map(|target| target.executable.as_str())
+                .unwrap_or("target belum dipilih");
+            draw_label(
+                dc,
+                target,
+                Rect::new(
+                    rect.left + 14,
+                    rect.top + 25,
+                    rect.right - 14,
+                    rect.bottom - 3,
+                ),
+                if selected {
+                    COLOR_INK_MUTED
+                } else {
+                    COLOR_MUTED
+                },
+                state.fonts.small,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+            );
+        }
+
+        for (rect, label, target, danger) in [
+            (
+                RECT_TIMER_DUPLICATE,
+                "Salin",
+                HitTarget::TimerDuplicate,
+                false,
+            ),
+            (RECT_TIMER_DELETE, "Hapus", HitTarget::TimerDelete, true),
+            (RECT_TIMER_SAVE, "Simpan", HitTarget::TimerSave, false),
+        ] {
+            draw_flat_button(
+                dc,
+                rect,
+                label,
+                COLOR_BG,
+                if danger { COLOR_ERROR } else { COLOR_TEXT },
+                state.hot == target,
+                state.fonts.small,
+            );
+        }
+        draw_label(
+            dc,
+            "SMART RESET CAPTURE",
+            Rect::new(520, 552, 876, 572),
+            COLOR_ACCENT,
+            state.fonts.small,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
+        draw_label(
+            dc,
+            "Paste teks reset, atau baca clipboard satu kali.",
+            Rect::new(520, 568, 876, 584),
+            COLOR_MUTED,
+            state.fonts.small,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
+        rounded_box(
+            dc,
+            Rect::new(520, 584, 876, 612),
+            10,
+            COLOR_PANEL_2,
+            COLOR_PANEL_BORDER,
+        );
+        draw_flat_button(
+            dc,
+            RECT_SMART_CLIPBOARD,
+            "Baca clipboard",
+            COLOR_PANEL_2,
+            COLOR_TEXT,
+            state.hot == HitTarget::SmartResetClipboard,
+            state.fonts.small,
+        );
+        draw_flat_button(
+            dc,
+            RECT_SMART_APPLY,
+            "Terapkan",
+            COLOR_ACCENT,
+            COLOR_INK,
+            state.hot == HitTarget::SmartResetApply,
+            state.fonts.small,
         );
     }
 }
@@ -4014,6 +4337,31 @@ unsafe fn initialize_controls(state: &mut AppState, instance: Hinstance) {
             },
         );
         ShowWindow(state.profile_name_edit, SW_HIDE);
+        let initial_timer_name = state
+            .timer_library
+            .selected()
+            .map(|timer| timer.name.clone())
+            .unwrap_or_else(|| "Timer".to_owned());
+        state.timer_name_edit = create_edit(
+            state.window,
+            instance,
+            EditSpec {
+                id: 108,
+                text: &initial_timer_name,
+                bounds: Rect::new(662, 125, 868, 149),
+                style: 0,
+            },
+        );
+        state.smart_reset_edit = create_edit(
+            state.window,
+            instance,
+            EditSpec {
+                id: 109,
+                text: "Resets in 3 h 27 min",
+                bounds: Rect::new(528, 587, 868, 607),
+                style: 0,
+            },
+        );
 
         for edit in [state.hour_edit, state.minute_edit, state.second_edit] {
             SendMessageW(
@@ -4022,7 +4370,12 @@ unsafe fn initialize_controls(state: &mut AppState, instance: Hinstance) {
                 state.fonts.timer as Wparam,
                 TRUE as Lparam,
             );
-            SendMessageW(edit, EM_SETLIMITTEXT, 2, 0);
+            SendMessageW(
+                edit,
+                EM_SETLIMITTEXT,
+                if edit == state.hour_edit { 3 } else { 2 },
+                0,
+            );
             SendMessageW(
                 edit,
                 EM_SETMARGINS,
@@ -4090,6 +4443,23 @@ unsafe fn initialize_controls(state: &mut AppState, instance: Hinstance) {
             (8 | (8 << 16)) as Lparam,
         );
         SetWindowTheme(state.profile_name_edit, dark.as_ptr(), null());
+        for edit in [state.timer_name_edit, state.smart_reset_edit] {
+            SendMessageW(
+                edit,
+                WM_SETFONT,
+                state.fonts.small as Wparam,
+                TRUE as Lparam,
+            );
+            SendMessageW(edit, EM_SETLIMITTEXT, 512, 0);
+            SendMessageW(
+                edit,
+                EM_SETMARGINS,
+                EC_LEFTMARGIN | EC_RIGHTMARGIN,
+                (8 | (8 << 16)) as Lparam,
+            );
+            SetWindowTheme(edit, dark.as_ptr(), null());
+        }
+        sync_selected_timer_to_controls(state);
     }
 }
 
@@ -4338,10 +4708,11 @@ fn synchronize_all_profile_targets(profiles: &ProfileLibrary, macros: &mut Macro
 }
 
 unsafe fn export_backup_to_path(state: &mut AppState, path: &Path) {
-    let bundle = BackupBundle::new(
+    let bundle = BackupBundle::with_timers(
         state.macro_library.clone(),
         state.profile_library.clone(),
         state.settings.clone(),
+        state.timer_library.clone(),
     );
     match save_backup(path, &bundle) {
         Ok(()) => {
@@ -4374,9 +4745,12 @@ unsafe fn import_backup_from_path(state: &mut AppState, path: &Path) {
     let available_ids: Vec<u32> = bundle.macros.macros.iter().map(|item| item.id).collect();
     bundle.profiles.remove_missing_macro_links(&available_ids);
     synchronize_all_profile_targets(&bundle.profiles, &mut bundle.macros);
+    // Import tidak pernah meneruskan timer aktif dari komputer/sesi lain.
+    bundle.timers.cancel_all();
     let save_result = save_library(&state.macro_path, &bundle.macros)
         .and_then(|_| save_profiles(&state.profiles_path, &bundle.profiles))
-        .and_then(|_| save_settings(&state.settings_path, &bundle.settings));
+        .and_then(|_| save_settings(&state.settings_path, &bundle.settings))
+        .and_then(|_| save_timers(&state.timers_path, &bundle.timers));
     if let Err(error) = save_result {
         state.profile_status_kind = StatusKind::Error;
         state.profile_status = format!("Import valid tetapi gagal disimpan: {error}");
@@ -4386,10 +4760,13 @@ unsafe fn import_backup_from_path(state: &mut AppState, path: &Path) {
     state.macro_library = bundle.macros;
     state.profile_library = bundle.profiles;
     state.settings = bundle.settings;
+    state.timer_library = bundle.timers;
     state.macro_targets.clear();
     state.profile_targets.clear();
+    state.timer_targets.clear();
     state.macro_dirty = false;
     state.profile_dirty = false;
+    state.timer_dirty = false;
     let _ = unsafe { configure_auto_start(state.settings.auto_start) };
     if let Err(message) = unsafe { register_emergency_hotkey(state) } {
         state.settings_status_kind = StatusKind::Warning;
@@ -4399,6 +4776,8 @@ unsafe fn import_backup_from_path(state: &mut AppState, path: &Path) {
         sync_macro_name_edit(state);
         sync_profile_name_edit(state);
         sync_delay_edit(state);
+        KillTimer(state.window, TIMER_COUNTDOWN);
+        sync_selected_timer_to_controls(state);
     }
     state.profile_status_kind = StatusKind::Sent;
     state.profile_status = format!(
@@ -4421,8 +4800,15 @@ unsafe fn emergency_stop(state: &mut AppState, source: &str) {
     TRIGGER_HELD.store(false, Ordering::Release);
     state.trigger_down = false;
     state.trigger_macro_id = None;
-    if state.settings.emergency_stops_timers && state.running {
-        unsafe { cancel_timer(state) };
+    if state.settings.emergency_stops_timers && state.timer_library.running_count() > 0 {
+        state.timer_library.cancel_all();
+        let _ = save_timers(&state.timers_path, &state.timer_library);
+        unsafe {
+            KillTimer(state.window, TIMER_COUNTDOWN);
+            sync_selected_timer_to_controls(state);
+        }
+        state.status_kind = StatusKind::Warning;
+        state.status = "Semua timer dibatalkan oleh Emergency Stop.".to_owned();
     }
     state.macro_status_kind = StatusKind::Warning;
     state.macro_status = format!("Emergency Stop dari {source}: semua macro dihentikan.");
@@ -4893,11 +5279,29 @@ unsafe fn finish_target_capture(state: &mut AppState) {
 
         let mut process_id = 0;
         GetWindowThreadProcessId(target_window, &mut process_id);
-        state.target = Some(TargetWindow {
+        let executable = match process_executable_name(process_id) {
+            Ok(value) if !value.is_empty() => value,
+            _ => {
+                state.status_kind = StatusKind::Error;
+                state.status = "Executable target tidak dapat diverifikasi.".to_owned();
+                InvalidateRect(state.window, null(), FALSE);
+                return;
+            }
+        };
+        let target = TargetWindow {
             window: target_window,
             process_id,
             title: title.clone(),
-        });
+            executable,
+        };
+        let selected_id = state.timer_library.selected_id;
+        if let Some(timer) = state.timer_library.selected_mut() {
+            timer.target = Some(target_specification(&target));
+        }
+        state.timer_targets.insert(selected_id, target.clone());
+        state.target = Some(target);
+        state.timer_dirty = true;
+        let _ = save_timers(&state.timers_path, &state.timer_library);
         state.status_kind = StatusKind::Ready;
         state.status = format!("Target siap: {title}");
         InvalidateRect(state.window, null(), FALSE);
@@ -4907,7 +5311,15 @@ unsafe fn finish_target_capture(state: &mut AppState) {
 unsafe fn add_preset(state: &mut AppState, seconds: u64) {
     unsafe {
         let current = read_duration_fields(state);
-        set_duration_fields(state, current.add_seconds(seconds));
+        let updated = current.add_seconds(seconds);
+        set_duration_fields(state, updated);
+        if let Some(timer) = state.timer_library.selected_mut()
+            && let Ok(total) = updated.validate()
+        {
+            timer.duration_seconds = total;
+            timer.remaining_seconds = total;
+            state.timer_dirty = true;
+        }
         state.status_kind = StatusKind::Ready;
         state.status = "Waktu tunggu diperbarui.".to_owned();
         InvalidateRect(state.window, null(), FALSE);
@@ -5218,7 +5630,7 @@ unsafe fn begin_timer(state: &mut AppState) {
         }
     };
 
-    let target = match state.target.as_ref() {
+    let target = match state.target.clone() {
         Some(target) => target,
         None => {
             state.status_kind = StatusKind::Error;
@@ -5234,7 +5646,7 @@ unsafe fn begin_timer(state: &mut AppState) {
         }
     };
 
-    if let Err(message) = unsafe { validate_target(target) } {
+    if let Err(message) = unsafe { validate_target(&target) } {
         state.target = None;
         state.status_kind = StatusKind::Error;
         state.status = message.clone();
@@ -5259,13 +5671,56 @@ unsafe fn begin_timer(state: &mut AppState) {
         return;
     }
 
+    if let Err(message) = unsafe { update_selected_timer_from_controls(state) } {
+        state.status_kind = StatusKind::Error;
+        state.status = message;
+        unsafe {
+            InvalidateRect(state.window, null(), FALSE);
+        }
+        return;
+    }
+    let selected_id = state.timer_library.selected_id;
+    let start_result = state
+        .timer_library
+        .selected_mut()
+        .ok_or_else(|| "Timer terpilih tidak ditemukan.".to_owned())
+        .and_then(|timer| {
+            timer
+                .start(
+                    now_unix_ms(),
+                    total,
+                    timer_action(state.action_mode),
+                    prompt.trim().to_owned(),
+                    target_specification(&target),
+                )
+                .map_err(str::to_owned)
+        });
+    if let Err(message) = start_result {
+        state.status_kind = StatusKind::Error;
+        state.status = message;
+        unsafe { InvalidateRect(state.window, null(), FALSE) };
+        return;
+    }
+    if let Err(error) = save_timers(&state.timers_path, &state.timer_library) {
+        if let Some(timer) = state.timer_library.selected_mut() {
+            timer.cancel();
+        }
+        state.status_kind = StatusKind::Error;
+        state.status = format!("Timer tidak dimulai karena gagal disimpan: {error}");
+        unsafe { InvalidateRect(state.window, null(), FALSE) };
+        return;
+    }
+    state.timer_targets.insert(selected_id, target);
     state.original_seconds = total;
     state.remaining_seconds = total;
     state.armed_prompt = prompt.trim().to_owned();
-    state.deadline = Instant::now().checked_add(Duration::from_secs(total));
     state.running = true;
+    state.timer_dirty = false;
     state.status_kind = StatusKind::Running;
-    state.status = "Timer aktif. Target akan difokuskan otomatis saat nol.".to_owned();
+    state.status = format!(
+        "Timer aktif. {} timer berjalan bersamaan.",
+        state.timer_library.running_count()
+    );
     unsafe {
         state.set_controls_visible(false);
         state.set_prompt_enabled();
@@ -5276,9 +5731,14 @@ unsafe fn begin_timer(state: &mut AppState) {
 
 unsafe fn cancel_timer(state: &mut AppState) {
     unsafe {
-        KillTimer(state.window, TIMER_COUNTDOWN);
+        if let Some(timer) = state.timer_library.selected_mut() {
+            timer.cancel();
+        }
+        let _ = save_timers(&state.timers_path, &state.timer_library);
+        if state.timer_library.running_count() == 0 {
+            KillTimer(state.window, TIMER_COUNTDOWN);
+        }
         state.running = false;
-        state.deadline = None;
         state.status_kind = StatusKind::Warning;
         state.status = "Timer dibatalkan. Tidak ada input yang dikirim.".to_owned();
         state.set_controls_visible(true);
@@ -5287,32 +5747,54 @@ unsafe fn cancel_timer(state: &mut AppState) {
     }
 }
 
-unsafe fn finish_timer(state: &mut AppState) {
+unsafe fn finish_timer(state: &mut AppState, timer_id: u32) {
     unsafe {
-        KillTimer(state.window, TIMER_COUNTDOWN);
-        state.running = false;
-        state.deadline = None;
-        state.remaining_seconds = 0;
-
-        let result = match state.target.clone() {
-            Some(target) => {
-                perform_scheduled_action(&target, state.action_mode, &state.armed_prompt)
-                    .map(|_| target.title)
-            }
-            None => Err("Target tidak tersedia.".to_owned()),
+        let Some(timer) = state
+            .timer_library
+            .timers
+            .iter()
+            .find(|timer| timer.id == timer_id)
+            .cloned()
+        else {
+            return;
         };
-
-        state.set_controls_visible(true);
-        state.set_prompt_enabled();
+        let result = match timer.target.as_ref() {
+            Some(specification) => {
+                resolve_timer_target(state, timer_id, specification).and_then(|target| {
+                    perform_scheduled_action(&target, action_mode(timer.action), &timer.prompt)
+                        .map(|_| target.title)
+                })
+            }
+            None => Err("Target timer tidak tersedia.".to_owned()),
+        };
+        state.timer_library.mark_result(timer_id, result.is_ok());
+        let _ = save_timers(&state.timers_path, &state.timer_library);
+        if state.timer_library.running_count() == 0 {
+            KillTimer(state.window, TIMER_COUNTDOWN);
+        }
+        let is_selected = timer_id == state.timer_library.selected_id;
+        if is_selected {
+            sync_selected_timer_to_controls(state);
+        }
         match result {
             Ok(title) => {
                 state.status_kind = StatusKind::Sent;
-                state.status = format!("Perintah berhasil dikirim ke {title}");
+                state.status = format!("{} berhasil dikirim ke {title}", timer.name);
+                show_tray_notification(
+                    state,
+                    "Timer selesai",
+                    &format!("{} berhasil menjalankan aksi satu kali.", timer.name),
+                );
                 MessageBeep(MB_OK);
             }
             Err(message) => {
                 state.status_kind = StatusKind::Error;
-                state.status = message.clone();
+                state.status = format!("{} gagal: {message}", timer.name);
+                show_tray_notification(
+                    state,
+                    "Timer gagal",
+                    &format!("{} tidak mengirim input. {message}", timer.name),
+                );
                 ShowWindow(state.window, SW_RESTORE);
                 SetForegroundWindow(state.window);
                 #[cfg(not(test))]
@@ -5324,20 +5806,31 @@ unsafe fn finish_timer(state: &mut AppState) {
 }
 
 unsafe fn update_countdown(state: &mut AppState) {
-    let Some(deadline) = state.deadline else {
-        return;
-    };
-    let remaining = deadline.saturating_duration_since(Instant::now());
-    if remaining.is_zero() {
-        unsafe { finish_timer(state) };
-        return;
+    let previous: Vec<(u32, u64, TimerPhase)> = state
+        .timer_library
+        .timers
+        .iter()
+        .map(|timer| (timer.id, timer.remaining_seconds, timer.phase))
+        .collect();
+    let due = state.timer_library.refresh_due(now_unix_ms());
+    if let Some(selected) = state.timer_library.selected() {
+        state.running = selected.is_running();
+        state.original_seconds = selected.duration_seconds;
+        state.remaining_seconds = selected.remaining_seconds;
     }
-    let rounded_up = remaining.as_secs() + u64::from(remaining.subsec_nanos() > 0);
-    if rounded_up != state.remaining_seconds {
-        state.remaining_seconds = rounded_up;
-        unsafe {
-            InvalidateRect(state.window, null(), FALSE);
-        }
+    for timer_id in due {
+        unsafe { finish_timer(state, timer_id) };
+    }
+    let changed = previous.iter().any(|(id, remaining, phase)| {
+        state
+            .timer_library
+            .timers
+            .iter()
+            .find(|timer| timer.id == *id)
+            .is_none_or(|timer| timer.remaining_seconds != *remaining || timer.phase != *phase)
+    });
+    if changed {
+        unsafe { InvalidateRect(state.window, null(), FALSE) };
     }
 }
 
@@ -5380,6 +5873,217 @@ unsafe fn sync_profile_name_edit(state: &AppState) {
         .map(|profile| profile.name.as_str())
         .unwrap_or("Profil");
     unsafe { SetWindowTextW(state.profile_name_edit, wide(name).as_ptr()) };
+}
+
+fn timer_action(action: ActionMode) -> TimerAction {
+    match action {
+        ActionMode::EnterOnly => TimerAction::EnterOnly,
+        ActionMode::TextAndEnter => TimerAction::TextAndEnter,
+    }
+}
+
+fn action_mode(action: TimerAction) -> ActionMode {
+    match action {
+        TimerAction::EnterOnly => ActionMode::EnterOnly,
+        TimerAction::TextAndEnter => ActionMode::TextAndEnter,
+    }
+}
+
+fn target_specification(target: &TargetWindow) -> MacroTarget {
+    MacroTarget {
+        executable: target.executable.clone(),
+        window_title: target.title.clone(),
+    }
+}
+
+unsafe fn resolve_timer_target(
+    state: &mut AppState,
+    timer_id: u32,
+    specification: &MacroTarget,
+) -> Result<TargetWindow, String> {
+    if let Some(target) = state.timer_targets.get(&timer_id)
+        && unsafe { validate_target(target) }.is_ok()
+        && target
+            .executable
+            .eq_ignore_ascii_case(&specification.executable)
+    {
+        return Ok(target.clone());
+    }
+    state.timer_targets.remove(&timer_id);
+    let resolved = unsafe { find_saved_macro_target(specification) }?;
+    let target = TargetWindow {
+        window: resolved.root,
+        process_id: resolved.process_id,
+        title: resolved.title,
+        executable: specification.executable.clone(),
+    };
+    state.timer_targets.insert(timer_id, target.clone());
+    Ok(target)
+}
+
+unsafe fn sync_selected_timer_to_controls(state: &mut AppState) {
+    let Some(timer) = state.timer_library.selected().cloned() else {
+        return;
+    };
+    state.running = timer.is_running();
+    state.original_seconds = timer.duration_seconds;
+    state.remaining_seconds = timer.remaining_seconds;
+    state.armed_prompt = timer.prompt.clone();
+    state.action_mode = action_mode(timer.action);
+    unsafe {
+        SetWindowTextW(state.timer_name_edit, wide(&timer.name).as_ptr());
+        set_duration_fields(
+            state,
+            DurationFields::from_total_seconds(timer.duration_seconds),
+        );
+        SetWindowTextW(state.prompt_edit, wide(&timer.prompt).as_ptr());
+    }
+    state.target = match timer.target.as_ref() {
+        Some(specification) => unsafe { resolve_timer_target(state, timer.id, specification) }.ok(),
+        None => None,
+    };
+    unsafe {
+        state.set_controls_visible(!state.running);
+        state.set_prompt_enabled();
+    }
+}
+
+unsafe fn update_selected_timer_from_controls(state: &mut AppState) -> Result<(), String> {
+    if state.running {
+        return Ok(());
+    }
+    let name = unsafe { get_window_text(state.timer_name_edit) };
+    if name.trim().is_empty() {
+        return Err("Nama timer tidak boleh kosong.".to_owned());
+    }
+    let duration = unsafe { read_duration_fields(state) }
+        .validate()
+        .map_err(str::to_owned)?;
+    let prompt = unsafe { get_window_text(state.prompt_edit) };
+    if state.action_mode == ActionMode::TextAndEnter && prompt.trim().is_empty() {
+        return Err("Isi teks yang akan dikirim, atau pilih Hanya Enter.".to_owned());
+    }
+    let target = state.target.as_ref().map(target_specification).or_else(|| {
+        state
+            .timer_library
+            .selected()
+            .and_then(|timer| timer.target.clone())
+    });
+    let Some(timer) = state.timer_library.selected_mut() else {
+        return Err("Timer terpilih tidak ditemukan.".to_owned());
+    };
+    timer.name = name.trim().to_owned();
+    timer.duration_seconds = duration;
+    timer.remaining_seconds = duration;
+    timer.action = timer_action(state.action_mode);
+    timer.prompt = prompt.trim().to_owned();
+    timer.target = target;
+    Ok(())
+}
+
+unsafe fn persist_timer_library(state: &mut AppState, message: &str) -> bool {
+    match save_timers(&state.timers_path, &state.timer_library) {
+        Ok(()) => {
+            state.timer_dirty = false;
+            state.status_kind = StatusKind::Sent;
+            state.status = message.to_owned();
+            unsafe { InvalidateRect(state.window, null(), FALSE) };
+            true
+        }
+        Err(error) => {
+            state.status_kind = StatusKind::Error;
+            state.status = format!("Timer gagal disimpan: {error}");
+            unsafe { InvalidateRect(state.window, null(), FALSE) };
+            false
+        }
+    }
+}
+
+unsafe fn save_selected_timer(state: &mut AppState) -> bool {
+    if let Err(message) = unsafe { update_selected_timer_from_controls(state) } {
+        state.status_kind = StatusKind::Error;
+        state.status = message;
+        unsafe { InvalidateRect(state.window, null(), FALSE) };
+        return false;
+    }
+    state.timer_dirty = true;
+    unsafe { persist_timer_library(state, "Timer dan target tersimpan.") }
+}
+
+unsafe fn clipboard_text(owner: Hwnd) -> Result<String, String> {
+    unsafe {
+        if IsClipboardFormatAvailable(CF_UNICODETEXT) == FALSE {
+            return Err("Clipboard tidak berisi teks Unicode.".to_owned());
+        }
+        if OpenClipboard(owner) == FALSE {
+            return Err("Clipboard sedang dipakai aplikasi lain. Coba lagi.".to_owned());
+        }
+        let result = (|| {
+            let memory = GetClipboardData(CF_UNICODETEXT);
+            if memory == 0 {
+                return Err("Teks clipboard tidak dapat dibaca.".to_owned());
+            }
+            let pointer = GlobalLock(memory) as *const u16;
+            if pointer.is_null() {
+                return Err("Teks clipboard tidak dapat dikunci.".to_owned());
+            }
+            let mut length = 0usize;
+            while length < 16_384 && *pointer.add(length) != 0 {
+                length += 1;
+            }
+            let text = String::from_utf16_lossy(std::slice::from_raw_parts(pointer, length));
+            GlobalUnlock(memory);
+            if text.trim().is_empty() {
+                Err("Clipboard teks kosong.".to_owned())
+            } else {
+                Ok(text)
+            }
+        })();
+        CloseClipboard();
+        result
+    }
+}
+
+unsafe fn local_clock_context() -> ClockContext {
+    let mut time = SystemTimeW::default();
+    unsafe { GetLocalTime(&mut time) };
+    ClockContext {
+        hour: time.hour.min(23) as u8,
+        minute: time.minute.min(59) as u8,
+        second: time.second.min(59) as u8,
+        weekday: time.day_of_week.min(6) as u8,
+    }
+}
+
+unsafe fn apply_smart_reset(state: &mut AppState, text: &str) -> bool {
+    if state.running {
+        return false;
+    }
+    match parse_reset_text(text, unsafe { local_clock_context() }) {
+        Ok(capture) => {
+            unsafe {
+                set_duration_fields(state, DurationFields::from_total_seconds(capture.seconds));
+                SetWindowTextW(state.smart_reset_edit, wide(text.trim()).as_ptr());
+            }
+            if let Some(timer) = state.timer_library.selected_mut() {
+                timer.duration_seconds = capture.seconds;
+                timer.remaining_seconds = capture.seconds;
+            }
+            state.original_seconds = capture.seconds;
+            state.remaining_seconds = capture.seconds;
+            state.timer_dirty = true;
+            state.status_kind = StatusKind::Sent;
+            state.status = capture.summary;
+            unsafe { InvalidateRect(state.window, null(), FALSE) };
+            true
+        }
+        Err(message) => {
+            state.status_kind = StatusKind::Error;
+            state.status = message.to_owned();
+            unsafe { InvalidateRect(state.window, null(), FALSE) };
+            false
+        }
+    }
 }
 
 fn apply_selected_profile_target_to_linked_macros(state: &mut AppState) {
@@ -5438,6 +6142,14 @@ unsafe fn switch_tab(state: &mut AppState, tab: AppTab) {
     if state.tab == tab {
         return;
     }
+    if state.tab == AppTab::Timer
+        && tab != AppTab::Timer
+        && state.timer_dirty
+        && !state.running
+        && !unsafe { save_selected_timer(state) }
+    {
+        return;
+    }
     if state.recording {
         unsafe { stop_macro_recording(state) };
     }
@@ -5458,6 +6170,8 @@ unsafe fn switch_tab(state: &mut AppState, tab: AppTab) {
                     state.profile_targets.remove(&selected_id);
                 }
             }
+        } else if state.tab == AppTab::Timer {
+            sync_selected_timer_to_controls(state);
         }
         resize_for_tab(state);
         state.set_controls_visible(!state.running);
@@ -6132,6 +6846,26 @@ unsafe fn confirm_delete_profile(window: Hwnd, name: &str) -> bool {
     }
 }
 
+unsafe fn confirm_delete_timer(window: Hwnd, name: &str) -> bool {
+    #[cfg(test)]
+    {
+        let _ = (window, name);
+        true
+    }
+    #[cfg(not(test))]
+    unsafe {
+        MessageBoxW(
+            window,
+            wide(&format!(
+                "Hapus timer ‘{name}’? Timer yang sedang berjalan tidak dapat dihapus."
+            ))
+            .as_ptr(),
+            wide("Hapus timer").as_ptr(),
+            MB_YESNO | MB_ICONWARNING,
+        ) == IDYES
+    }
+}
+
 unsafe fn confirm_import_backup(window: Hwnd) -> bool {
     #[cfg(test)]
     {
@@ -6142,7 +6876,7 @@ unsafe fn confirm_import_backup(window: Hwnd) -> bool {
     unsafe {
         MessageBoxW(
             window,
-            wide("Import akan mengganti macro, profil, dan Settings saat ini. Lanjutkan?").as_ptr(),
+            wide("Import akan mengganti macro, profil, timer, dan Settings saat ini. Timer aktif dari backup selalu dibatalkan demi keamanan. Lanjutkan?").as_ptr(),
             wide("Import backup VibeTimer").as_ptr(),
             MB_YESNO | MB_ICONWARNING,
         ) == IDYES
@@ -6159,6 +6893,113 @@ unsafe fn handle_click(state: &mut AppState, target: HitTarget) {
         HitTarget::AddThirtyMinutes => unsafe { add_preset(state, 30 * 60) },
         HitTarget::AddOneHour => unsafe { add_preset(state, 60 * 60) },
         HitTarget::AddThreeHours => unsafe { add_preset(state, 3 * 60 * 60) },
+        HitTarget::TimerNew => {
+            if !state.running && !unsafe { save_selected_timer(state) } {
+                return;
+            }
+            if state.timer_library.add_timer() {
+                state.timer_dirty = true;
+                unsafe {
+                    sync_selected_timer_to_controls(state);
+                    persist_timer_library(state, "Timer baru dibuat.");
+                }
+            } else {
+                state.status_kind = StatusKind::Warning;
+                state.status =
+                    "Maksimal 6 timer agar semua tetap terlihat dan mudah diawasi.".to_owned();
+                unsafe { InvalidateRect(state.window, null(), FALSE) };
+            }
+        }
+        HitTarget::TimerItem(index) => {
+            let Some(timer_id) = state.timer_library.timers.get(index).map(|timer| timer.id) else {
+                return;
+            };
+            if timer_id == state.timer_library.selected_id {
+                return;
+            }
+            if !state.running && !unsafe { save_selected_timer(state) } {
+                return;
+            }
+            state.timer_library.selected_id = timer_id;
+            unsafe { sync_selected_timer_to_controls(state) };
+            state.status_kind = if state.running {
+                StatusKind::Running
+            } else {
+                StatusKind::Ready
+            };
+            state.status = state
+                .timer_library
+                .selected()
+                .map(|timer| format!("Mengelola {} — {}.", timer.name, timer.phase.label()))
+                .unwrap_or_else(|| "Timer dipilih.".to_owned());
+            unsafe { InvalidateRect(state.window, null(), FALSE) };
+        }
+        HitTarget::TimerDuplicate => {
+            if !state.running && !unsafe { save_selected_timer(state) } {
+                return;
+            }
+            if state.timer_library.duplicate_selected() {
+                state.timer_dirty = true;
+                unsafe {
+                    sync_selected_timer_to_controls(state);
+                    persist_timer_library(state, "Timer disalin sebagai template baru.");
+                }
+            } else {
+                state.status_kind = StatusKind::Warning;
+                state.status = "Timer tidak dapat disalin; batas 6 timer tercapai.".to_owned();
+                unsafe { InvalidateRect(state.window, null(), FALSE) };
+            }
+        }
+        HitTarget::TimerDelete => {
+            let selected = state.timer_library.selected().cloned();
+            let Some(timer) = selected else {
+                return;
+            };
+            if timer.is_running() {
+                state.status_kind = StatusKind::Warning;
+                state.status = "Batalkan timer sebelum menghapusnya.".to_owned();
+                unsafe { InvalidateRect(state.window, null(), FALSE) };
+                return;
+            }
+            if unsafe { confirm_delete_timer(state.window, &timer.name) }
+                && state.timer_library.delete_selected()
+            {
+                state.timer_targets.remove(&timer.id);
+                state.timer_dirty = true;
+                unsafe {
+                    sync_selected_timer_to_controls(state);
+                    persist_timer_library(state, "Timer dihapus.");
+                }
+            } else if state.timer_library.timers.len() <= 1 {
+                state.status_kind = StatusKind::Warning;
+                state.status = "Minimal satu timer harus tetap tersedia.".to_owned();
+                unsafe { InvalidateRect(state.window, null(), FALSE) };
+            }
+        }
+        HitTarget::TimerSave => {
+            unsafe { save_selected_timer(state) };
+        }
+        HitTarget::SmartResetClipboard => {
+            if state.running {
+                return;
+            }
+            match unsafe { clipboard_text(state.window) } {
+                Ok(text) => {
+                    unsafe { apply_smart_reset(state, &text) };
+                }
+                Err(message) => {
+                    state.status_kind = StatusKind::Error;
+                    state.status = message;
+                    unsafe { InvalidateRect(state.window, null(), FALSE) };
+                }
+            }
+        }
+        HitTarget::SmartResetApply => {
+            if !state.running {
+                let text = unsafe { get_window_text(state.smart_reset_edit) };
+                unsafe { apply_smart_reset(state, &text) };
+            }
+        }
         HitTarget::PickTarget => unsafe { begin_target_capture(state) },
         HitTarget::EnterOnly => {
             state.action_mode = ActionMode::EnterOnly;
@@ -6645,7 +7486,13 @@ unsafe fn handle_click(state: &mut AppState, target: HitTarget) {
                     window: target.root,
                     process_id: target.process_id,
                     title: target.title.clone(),
+                    executable: specification.executable.clone(),
                 });
+                if let Some(timer) = state.timer_library.selected_mut() {
+                    timer.target = Some(specification.clone());
+                }
+                state.timer_dirty = true;
+                let _ = save_timers(&state.timers_path, &state.timer_library);
                 state
                     .profile_targets
                     .insert(state.profile_library.selected_id, target);
@@ -6720,6 +7567,9 @@ unsafe extern "system" fn window_proc(
                     state.settings_status_kind = StatusKind::Warning;
                     state.settings_status = message;
                 }
+                if state.timer_library.running_count() > 0 {
+                    SetTimer(state.window, TIMER_COUNTDOWN, 100, null());
+                }
             }
             0
         }
@@ -6754,7 +7604,9 @@ unsafe extern "system" fn window_proc(
             let dc = wparam as Hdc;
             let panel_editor = lparam == state.macro_name_edit
                 || lparam == state.macro_delay_edit
-                || lparam == state.profile_name_edit;
+                || lparam == state.profile_name_edit
+                || lparam == state.timer_name_edit
+                || lparam == state.smart_reset_edit;
             unsafe {
                 SetTextColor(
                     dc,
@@ -6837,6 +7689,14 @@ unsafe extern "system" fn window_proc(
                 state.profile_dirty = true;
                 unsafe { InvalidateRect(window, null(), FALSE) };
             }
+            if matches!(control_id, 101 | 102 | 103 | 104 | 108)
+                && notification == 0x0300
+                && state.tab == AppTab::Timer
+                && !state.running
+            {
+                state.timer_dirty = true;
+                unsafe { InvalidateRect(window, null(), FALSE) };
+            }
             match wparam & 0xFFFF {
                 MENU_OPEN => unsafe { restore_from_tray(state) },
                 MENU_STOP_ALL => unsafe { emergency_stop(state, "menu tray") },
@@ -6893,7 +7753,7 @@ unsafe extern "system" fn window_proc(
             0
         }
         WM_TIMER => {
-            if wparam == TIMER_COUNTDOWN && state.running {
+            if wparam == TIMER_COUNTDOWN && state.timer_library.running_count() > 0 {
                 unsafe { update_countdown(state) };
             } else if wparam == TIMER_CAPTURE
                 && state
@@ -6923,19 +7783,28 @@ unsafe extern "system" fn window_proc(
             if state.recording {
                 unsafe { stop_macro_recording(state) };
             }
-            if state.running {
+            if state.timer_library.running_count() > 0 {
                 let response = unsafe {
                     MessageBoxW(
                         window,
-                        wide("Timer masih aktif. Tutup VibeTimer dan batalkan pengiriman?")
+                        wide("Satu atau lebih timer masih aktif. Tutup VibeTimer? Timer masa depan akan dilanjutkan saat aplikasi dibuka lagi; timer yang terlewat tidak akan mengirim input.")
                             .as_ptr(),
-                        wide("Timer sedang berjalan").as_ptr(),
+                        wide("Multi Timer sedang berjalan").as_ptr(),
                         MB_YESNO | MB_ICONWARNING,
                     )
                 };
                 if response != IDYES {
                     return 0;
                 }
+            }
+            if state.timer_dirty && !state.running && !unsafe { save_selected_timer(state) } {
+                unsafe {
+                    show_warning(
+                        window,
+                        "Perubahan timer belum valid atau belum dapat disimpan. Perbaiki dahulu sebelum keluar.",
+                    )
+                };
+                return 0;
             }
             if state.macro_dirty {
                 let response = unsafe {
@@ -7373,17 +8242,26 @@ mod windows_e2e_tests {
             assert_eq!(hit_test(145, 442, state), HitTarget::EnterOnly);
             assert_eq!(hit_test(350, 442, state), HitTarget::TextAndEnter);
             assert_eq!(hit_test(260, 575, state), HitTarget::MainAction);
+            assert_eq!(hit_test(580, 137, state), HitTarget::TimerNew);
+            assert_eq!(hit_test(700, 194, state), HitTarget::TimerItem(0));
+            assert_eq!(hit_test(575, 529, state), HitTarget::TimerDuplicate);
+            assert_eq!(hit_test(695, 529, state), HitTarget::TimerDelete);
+            assert_eq!(hit_test(818, 529, state), HitTarget::TimerSave);
+            assert_eq!(hit_test(600, 628, state), HitTarget::SmartResetClipboard);
+            assert_eq!(hit_test(790, 628, state), HitTarget::SmartResetApply);
 
             state.profile_library = ProfileLibrary::default();
             sync_profile_name_edit(state);
             let e2e_profiles_path = PathBuf::from("qa/e2e-profiles.vtp");
             let e2e_profile_macros_path = PathBuf::from("qa/e2e-profile-macros.vtm");
             let e2e_settings_path = PathBuf::from("qa/e2e-settings.vts");
+            let e2e_timers_path = PathBuf::from("qa/e2e-timers.vtt");
             let e2e_backup_path = PathBuf::from("qa/e2e-backup.vtb");
             for path in [
                 &e2e_profiles_path,
                 &e2e_profile_macros_path,
                 &e2e_settings_path,
+                &e2e_timers_path,
                 &e2e_backup_path,
             ] {
                 let _ = fs::remove_file(path);
@@ -7391,6 +8269,10 @@ mod windows_e2e_tests {
             state.profiles_path = e2e_profiles_path.clone();
             state.macro_path = e2e_profile_macros_path.clone();
             state.settings_path = e2e_settings_path.clone();
+            state.timer_library = TimerLibrary::default();
+            state.timers_path = e2e_timers_path.clone();
+            sync_selected_timer_to_controls(state);
+            state.timer_dirty = false;
             switch_tab(state, AppTab::Profiles);
             assert_eq!(hit_test(100, 137, state), HitTarget::ProfileNew);
             assert_eq!(hit_test(84, 568, state), HitTarget::ProfileDuplicate);
@@ -7498,6 +8380,18 @@ mod windows_e2e_tests {
             assert_ne!(IsWindowVisible(main_window), FALSE);
             switch_tab(state, AppTab::Timer);
 
+            SetWindowTextW(
+                state.smart_reset_edit,
+                wide("Resets in 3 h 27 min").as_ptr(),
+            );
+            handle_click(state, HitTarget::SmartResetApply);
+            assert_eq!(
+                read_duration_fields(state),
+                DurationFields::new(3, 27, 0),
+                "Smart Reset harus menerapkan durasi Claude"
+            );
+            assert_eq!(state.status_kind, StatusKind::Sent);
+
             set_duration_fields(state, DurationFields::new(0, 0, 0));
             handle_click(state, HitTarget::AddThirtyMinutes);
             handle_click(state, HitTarget::AddOneHour);
@@ -7512,6 +8406,7 @@ mod windows_e2e_tests {
                 window: target_window,
                 process_id: GetCurrentProcessId(),
                 title: "VibeTimer E2E Target".to_owned(),
+                executable: "VibeTimer-test.exe".to_owned(),
             });
             assert_eq!(
                 state.target.as_ref().map(|target| target.title.as_str()),
@@ -7525,6 +8420,7 @@ mod windows_e2e_tests {
                 window: target_window,
                 process_id: 0,
                 title: "PID salah".to_owned(),
+                executable: "invalid.exe".to_owned(),
             };
             assert!(
                 validate_target(&invalid_target).is_err(),
@@ -7606,6 +8502,53 @@ mod windows_e2e_tests {
                 get_window_text(target_edit).is_empty(),
                 "timer yang dibatalkan tidak boleh mengirim input"
             );
+
+            // Dua timer benar-benar berjalan bersamaan dan masing-masing hanya mengirim sekali.
+            state.target = Some(TargetWindow {
+                window: target_window,
+                process_id: GetCurrentProcessId(),
+                title: "VibeTimer E2E Target".to_owned(),
+                executable: "VibeTimer-test.exe".to_owned(),
+            });
+            state.action_mode = ActionMode::EnterOnly;
+            set_duration_fields(state, DurationFields::new(0, 0, 1));
+            begin_timer(state);
+            assert_eq!(state.timer_library.running_count(), 1);
+            handle_click(state, HitTarget::TimerNew);
+            assert_eq!(state.timer_library.timers.len(), 2);
+            state.target = Some(TargetWindow {
+                window: target_window,
+                process_id: GetCurrentProcessId(),
+                title: "VibeTimer E2E Target".to_owned(),
+                executable: "VibeTimer-test.exe".to_owned(),
+            });
+            state.action_mode = ActionMode::EnterOnly;
+            set_duration_fields(state, DurationFields::new(0, 0, 2));
+            begin_timer(state);
+            assert_eq!(state.timer_library.running_count(), 2);
+            pump_messages_for(Duration::from_millis(2_450));
+            assert_eq!(state.timer_library.running_count(), 0);
+            assert!(
+                state
+                    .timer_library
+                    .timers
+                    .iter()
+                    .all(|timer| timer.phase == TimerPhase::Completed),
+                "kedua timer harus selesai satu kali"
+            );
+            assert!(
+                get_window_text(target_edit).len() >= 4,
+                "dua timer Enter harus menghasilkan dua baris"
+            );
+            InvalidateRect(main_window, null(), FALSE);
+            UpdateWindow(main_window);
+            pump_messages_for(Duration::from_millis(100));
+            save_window_bmp(main_window, Path::new("qa/vibetimer-multi-timer.bmp"))
+                .expect("snapshot Multi Timer dibuat");
+            handle_click(state, HitTarget::TimerDuplicate);
+            assert_eq!(state.timer_library.timers.len(), 3);
+            handle_click(state, HitTarget::TimerDelete);
+            assert_eq!(state.timer_library.timers.len(), 2);
 
             switch_tab(state, AppTab::Macro);
             assert_eq!(hit_test(100, 137, state), HitTarget::MacroNew);
@@ -8282,6 +9225,7 @@ mod windows_e2e_tests {
                 e2e_profiles_path,
                 e2e_profile_macros_path,
                 e2e_settings_path,
+                e2e_timers_path,
                 e2e_backup_path,
             ] {
                 let _ = fs::remove_file(&path);

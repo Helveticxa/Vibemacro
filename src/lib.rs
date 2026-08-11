@@ -4,9 +4,11 @@ pub mod backup;
 pub mod macro_engine;
 pub mod profiles;
 pub mod settings;
+pub mod smart_reset;
+pub mod timers;
 
-pub const MAX_HOURS: u32 = 99;
-pub const MAX_TOTAL_SECONDS: u64 = 99 * 3_600 + 59 * 60 + 59;
+pub const MAX_HOURS: u32 = 168;
+pub const MAX_TOTAL_SECONDS: u64 = 7 * 24 * 3_600;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DurationFields {
@@ -25,14 +27,14 @@ impl DurationFields {
     }
 
     pub fn validate(self) -> Result<u64, &'static str> {
-        if self.hours > MAX_HOURS {
-            return Err("Jam maksimal 99.");
-        }
         if self.minutes > 59 || self.seconds > 59 {
             return Err("Menit dan detik harus antara 00 sampai 59.");
         }
 
         let total = self.hours as u64 * 3_600 + self.minutes as u64 * 60 + self.seconds as u64;
+        if self.hours > MAX_HOURS || total > MAX_TOTAL_SECONDS {
+            return Err("Durasi maksimal 7 hari.");
+        }
         if total == 0 {
             return Err("Atur waktu lebih dari 00:00:00.");
         }
@@ -92,8 +94,8 @@ mod tests {
             DurationFields::new(1, 15, 30)
         );
         assert_eq!(
-            DurationFields::new(99, 59, 59).add_seconds(60),
-            DurationFields::new(99, 59, 59)
+            DurationFields::new(168, 0, 0).add_seconds(60),
+            DurationFields::new(168, 0, 0)
         );
     }
 
