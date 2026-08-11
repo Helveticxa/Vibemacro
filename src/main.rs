@@ -29,7 +29,15 @@ use vibe_timer_core::timers::{
     TimerAction, TimerLibrary, TimerPhase, default_timers_path, load_timers, now_unix_ms,
     save_timers,
 };
+use vibe_timer_core::updater::{
+    UpdateManifest, configured_feed_url, is_newer_version, sha256_file,
+};
 use vibe_timer_core::{DurationFields, format_duration};
+
+#[cfg(test)]
+use vibe_timer_core::updater::{digest_hex, parse_test_manifest, validate_test_feed_url};
+#[cfg(not(test))]
+use vibe_timer_core::updater::{parse_manifest, validate_feed_url};
 
 type Bool = i32;
 type Dword = u32;
@@ -99,6 +107,7 @@ const WM_SETFONT: Uint = 0x0030;
 const WM_SETICON: Uint = 0x0080;
 const WM_APP_MACRO_DONE: Uint = 0x8001;
 const WM_APP_TRAY: Uint = 0x8002;
+const WM_APP_UPDATE_RESULT: Uint = 0x8003;
 
 const EM_SETMARGINS: Uint = 0x00D3;
 const EM_SETLIMITTEXT: Uint = 0x00C5;
@@ -127,7 +136,6 @@ const DT_LEFT: Uint = 0x0000;
 const DT_CENTER: Uint = 0x0001;
 const DT_RIGHT: Uint = 0x0002;
 const DT_VCENTER: Uint = 0x0004;
-const DT_WORDBREAK: Uint = 0x0010;
 const DT_SINGLELINE: Uint = 0x0020;
 const DT_NOPREFIX: Uint = 0x0800;
 const DT_END_ELLIPSIS: Uint = 0x8000;
@@ -656,6 +664,17 @@ unsafe extern "system" {
     fn Shell_NotifyIconW(message: Dword, data: *mut NotifyIconDataW) -> Bool;
 }
 
+#[link(name = "urlmon")]
+unsafe extern "system" {
+    fn URLDownloadToFileW(
+        caller: *mut c_void,
+        url: *const u16,
+        file_name: *const u16,
+        reserved: Dword,
+        callback: *mut c_void,
+    ) -> i32;
+}
+
 #[link(name = "comdlg32")]
 unsafe extern "system" {
     fn GetSaveFileNameW(data: *mut OpenFileNameW) -> Bool;
@@ -818,6 +837,13 @@ enum StatusKind {
     Error,
 }
 
+enum UpdateWorkerResult {
+    Current,
+    Available(UpdateManifest),
+    InstallerReady(UpdateManifest, PathBuf),
+    Error(String),
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum HitTarget {
     None,
@@ -864,6 +890,8 @@ enum HitTarget {
     SettingMinimizeTray,
     SettingCloseTray,
     SettingAutoStart,
+    SettingUpdateChecks,
+    SettingCheckUpdate,
     SettingEmergencyHotkey(EmergencyHotkey),
     SettingEmergencyTimers,
     SettingMaxRuntime(u32),
@@ -955,6 +983,9 @@ struct AppState {
     settings_path: PathBuf,
     settings_status_kind: StatusKind,
     settings_status: String,
+    update_busy: bool,
+    update_available: Option<UpdateManifest>,
+    update_installer_ready: Option<PathBuf>,
     tray_icon: Hicon,
     tray_added: bool,
     exit_requested: bool,
@@ -1098,6 +1129,9 @@ impl AppState {
             settings_path,
             settings_status_kind,
             settings_status,
+            update_busy: false,
+            update_available: None,
+            update_installer_ready: None,
             tray_icon: 0,
             tray_added: false,
             exit_requested: false,
@@ -1275,6 +1309,8 @@ const RECT_MACRO_DELETE: Rect = Rect::new(134, 548, 218, 590);
 const RECT_SETTING_MINIMIZE_TRAY: Rect = Rect::new(42, 178, 382, 224);
 const RECT_SETTING_CLOSE_TRAY: Rect = Rect::new(42, 238, 382, 284);
 const RECT_SETTING_AUTO_START: Rect = Rect::new(42, 298, 382, 344);
+const RECT_SETTING_UPDATE_CHECKS: Rect = Rect::new(42, 378, 382, 420);
+const RECT_SETTING_CHECK_UPDATE: Rect = Rect::new(42, 430, 382, 472);
 const RECT_SETTING_HOTKEY_1: Rect = Rect::new(438, 178, 772, 218);
 const RECT_SETTING_HOTKEY_2: Rect = Rect::new(438, 226, 772, 266);
 const RECT_SETTING_HOTKEY_3: Rect = Rect::new(438, 274, 772, 314);
@@ -1374,6 +1410,8 @@ fn hit_test(x: i32, y: i32, state: &AppState) -> HitTarget {
             (RECT_SETTING_MINIMIZE_TRAY, HitTarget::SettingMinimizeTray),
             (RECT_SETTING_CLOSE_TRAY, HitTarget::SettingCloseTray),
             (RECT_SETTING_AUTO_START, HitTarget::SettingAutoStart),
+            (RECT_SETTING_UPDATE_CHECKS, HitTarget::SettingUpdateChecks),
+            (RECT_SETTING_CHECK_UPDATE, HitTarget::SettingCheckUpdate),
             (
                 RECT_SETTING_HOTKEY_1,
                 HitTarget::SettingEmergencyHotkey(EmergencyHotkey::CtrlAltF12),
@@ -3419,22 +3457,82 @@ unsafe fn draw_settings_interface(dc: Hdc, state: &AppState) {
                 state.fonts.small,
             );
         }
-        draw_hairline(dc, 42, 370, 382, COLOR_PANEL_BORDER);
+        draw_hairline(dc, 42, 358, 382, COLOR_PANEL_BORDER);
         draw_label(
             dc,
-            "Tray menjaga timer dan macro tetap berjalan saat jendela disembunyikan.",
-            Rect::new(42, 390, 382, 438),
-            COLOR_MUTED,
-            state.fonts.body,
-            DT_LEFT | DT_WORDBREAK,
+            "PEMBARUAN",
+            Rect::new(42, 350, 382, 378),
+            COLOR_ACCENT,
+            state.fonts.small,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
+        draw_flat_button(
+            dc,
+            RECT_SETTING_UPDATE_CHECKS,
+            if state.settings.update_checks_enabled {
+                "Cek update saat startup    AKTIF"
+            } else {
+                "Cek update saat startup    NONAKTIF"
+            },
+            if state.settings.update_checks_enabled {
+                COLOR_ACCENT_DARK
+            } else {
+                COLOR_PANEL_2
+            },
+            if state.settings.update_checks_enabled {
+                COLOR_ACCENT
+            } else {
+                COLOR_TEXT
+            },
+            state.hot == HitTarget::SettingUpdateChecks,
+            state.fonts.small,
+        );
+        let update_action = if state.update_busy {
+            "Memproses pembaruan...".to_owned()
+        } else if let (Some(manifest), Some(_)) = (
+            state.update_available.as_ref(),
+            state.update_installer_ready.as_ref(),
+        ) {
+            format!("Instal v{} yang terverifikasi", manifest.version)
+        } else if let Some(manifest) = state.update_available.as_ref() {
+            format!("Unduh VibeTimer v{}", manifest.version)
+        } else {
+            "Cek update sekarang".to_owned()
+        };
+        draw_flat_button(
+            dc,
+            RECT_SETTING_CHECK_UPDATE,
+            &update_action,
+            if state.update_installer_ready.is_some() {
+                COLOR_ACCENT
+            } else {
+                COLOR_PANEL_2
+            },
+            if state.update_installer_ready.is_some() {
+                COLOR_INK
+            } else {
+                COLOR_TEXT
+            },
+            state.hot == HitTarget::SettingCheckUpdate && !state.update_busy,
+            state.fonts.small,
         );
         draw_label(
             dc,
-            "Auto Start memakai registry Current User—tidak memerlukan Administrator.",
-            Rect::new(42, 456, 382, 510),
-            COLOR_DIM,
+            &if configured_feed_url().is_some() {
+                format!(
+                    "Versi {} • installer wajib lolos SHA-256",
+                    env!("CARGO_PKG_VERSION")
+                )
+            } else {
+                format!(
+                    "Versi {} • feed rilis belum dikonfigurasi",
+                    env!("CARGO_PKG_VERSION")
+                )
+            },
+            Rect::new(42, 480, 382, 510),
+            COLOR_MUTED,
             state.fonts.small,
-            DT_LEFT | DT_WORDBREAK,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
         );
 
         rounded_box(
@@ -4548,6 +4646,240 @@ unsafe fn persist_settings(state: &mut AppState, message: &str) -> bool {
             state.settings_status = format!("Pengaturan gagal disimpan: {error}");
             unsafe { InvalidateRect(state.window, null(), FALSE) };
             false
+        }
+    }
+}
+
+fn decode_update_manifest(bytes: &[u8]) -> Result<UpdateManifest, &'static str> {
+    #[cfg(not(test))]
+    {
+        parse_manifest(bytes)
+    }
+    #[cfg(test)]
+    {
+        parse_test_manifest(bytes)
+    }
+}
+
+fn validate_update_feed(url: &str) -> Result<(), &'static str> {
+    #[cfg(not(test))]
+    {
+        validate_feed_url(url)
+    }
+    #[cfg(test)]
+    {
+        validate_test_feed_url(url)
+    }
+}
+
+fn download_url_to_path(url: &str, path: &Path) -> Result<(), String> {
+    let url = wide(url);
+    let path = wide(&path.to_string_lossy());
+    let status =
+        unsafe { URLDownloadToFileW(null_mut(), url.as_ptr(), path.as_ptr(), 0, null_mut()) };
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(format!(
+            "Windows gagal mengunduh pembaruan (HRESULT 0x{status:08X})."
+        ))
+    }
+}
+
+fn check_update_worker(feed_url: &str, cache: &Path) -> UpdateWorkerResult {
+    if let Err(message) = validate_update_feed(feed_url) {
+        return UpdateWorkerResult::Error(message.to_owned());
+    }
+    if let Err(error) = std::fs::create_dir_all(cache) {
+        return UpdateWorkerResult::Error(format!("Folder update tidak dapat dibuat: {error}"));
+    }
+    let manifest_path = cache.join("manifest.vtu.tmp");
+    let _ = std::fs::remove_file(&manifest_path);
+    if let Err(message) = download_url_to_path(feed_url, &manifest_path) {
+        return UpdateWorkerResult::Error(message);
+    }
+    let bytes = match std::fs::read(&manifest_path) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return UpdateWorkerResult::Error(format!(
+                "Manifest update tidak dapat dibaca: {error}"
+            ));
+        }
+    };
+    let _ = std::fs::remove_file(manifest_path);
+    let manifest = match decode_update_manifest(&bytes) {
+        Ok(manifest) => manifest,
+        Err(message) => return UpdateWorkerResult::Error(message.to_owned()),
+    };
+    match is_newer_version(&manifest.version, env!("CARGO_PKG_VERSION")) {
+        Ok(true) => UpdateWorkerResult::Available(manifest),
+        Ok(false) => UpdateWorkerResult::Current,
+        Err(message) => UpdateWorkerResult::Error(message.to_owned()),
+    }
+}
+
+fn download_update_worker(manifest: UpdateManifest, cache: &Path) -> UpdateWorkerResult {
+    if let Err(error) = std::fs::create_dir_all(cache) {
+        return UpdateWorkerResult::Error(format!("Folder update tidak dapat dibuat: {error}"));
+    }
+    let final_path = cache.join(format!("VibeTimer-Setup-{}.exe", manifest.version));
+    let temporary = cache.join(format!("VibeTimer-Setup-{}.download", manifest.version));
+    let _ = std::fs::remove_file(&temporary);
+    if let Err(message) = download_url_to_path(&manifest.installer_url, &temporary) {
+        return UpdateWorkerResult::Error(message);
+    }
+    let metadata = match std::fs::metadata(&temporary) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            return UpdateWorkerResult::Error(format!(
+                "Installer update tidak dapat diperiksa: {error}"
+            ));
+        }
+    };
+    if metadata.len() == 0 || metadata.len() > 256 * 1024 * 1024 {
+        let _ = std::fs::remove_file(&temporary);
+        return UpdateWorkerResult::Error("Ukuran installer update tidak aman.".to_owned());
+    }
+    match sha256_file(&temporary) {
+        Ok(digest) if digest == manifest.sha256 => {}
+        Ok(_) => {
+            let _ = std::fs::remove_file(&temporary);
+            return UpdateWorkerResult::Error(
+                "SHA-256 installer tidak cocok. File dihapus dan tidak dijalankan.".to_owned(),
+            );
+        }
+        Err(error) => {
+            let _ = std::fs::remove_file(&temporary);
+            return UpdateWorkerResult::Error(format!(
+                "SHA-256 installer tidak dapat dihitung: {error}"
+            ));
+        }
+    }
+    let _ = std::fs::remove_file(&final_path);
+    if let Err(error) = std::fs::rename(&temporary, &final_path) {
+        let _ = std::fs::remove_file(&temporary);
+        return UpdateWorkerResult::Error(format!(
+            "Installer terverifikasi gagal disimpan: {error}"
+        ));
+    }
+    UpdateWorkerResult::InstallerReady(manifest, final_path)
+}
+
+fn post_update_result(window: Hwnd, result: UpdateWorkerResult) {
+    let result = Box::into_raw(Box::new(result));
+    if unsafe { PostMessageW(window, WM_APP_UPDATE_RESULT, 0, result as Lparam) } == FALSE {
+        unsafe { drop(Box::from_raw(result)) };
+    }
+}
+
+unsafe fn begin_update_check(state: &mut AppState) {
+    if state.update_busy {
+        return;
+    }
+    let Some(feed_url) = configured_feed_url() else {
+        state.settings_status_kind = StatusKind::Warning;
+        state.settings_status =
+            "Feed rilis belum dikonfigurasi. Upgrade installer manual tetap didukung.".to_owned();
+        unsafe { InvalidateRect(state.window, null(), FALSE) };
+        return;
+    };
+    if let Err(message) = validate_update_feed(&feed_url) {
+        state.settings_status_kind = StatusKind::Error;
+        state.settings_status = message.to_owned();
+        unsafe { InvalidateRect(state.window, null(), FALSE) };
+        return;
+    }
+    state.update_busy = true;
+    state.settings_status_kind = StatusKind::Running;
+    state.settings_status = "Memeriksa feed rilis melalui koneksi aman...".to_owned();
+    unsafe { InvalidateRect(state.window, null(), FALSE) };
+    let window = state.window;
+    let cache = state
+        .settings_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("updates");
+    thread::spawn(move || post_update_result(window, check_update_worker(&feed_url, &cache)));
+}
+
+unsafe fn begin_update_download(state: &mut AppState, manifest: UpdateManifest) {
+    if state.update_busy {
+        return;
+    }
+    state.update_busy = true;
+    state.settings_status_kind = StatusKind::Running;
+    state.settings_status = format!(
+        "Mengunduh v{}; installer akan diverifikasi sebelum dapat dijalankan...",
+        manifest.version
+    );
+    unsafe { InvalidateRect(state.window, null(), FALSE) };
+    let window = state.window;
+    let cache = state
+        .settings_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("updates");
+    thread::spawn(move || post_update_result(window, download_update_worker(manifest, &cache)));
+}
+
+#[cfg(test)]
+unsafe fn launch_verified_update(state: &mut AppState) {
+    state.settings_status_kind = StatusKind::Sent;
+    state.settings_status = "Installer update terverifikasi dan siap dijalankan.".to_owned();
+    unsafe { InvalidateRect(state.window, null(), FALSE) };
+}
+
+#[cfg(not(test))]
+unsafe fn launch_verified_update(state: &mut AppState) {
+    if state.timer_library.running_count() > 0
+        || state.recording
+        || MACRO_PLAYING.load(Ordering::Acquire)
+    {
+        state.settings_status_kind = StatusKind::Warning;
+        state.settings_status =
+            "Hentikan timer, recording, dan macro sebelum memasang update.".to_owned();
+        unsafe { InvalidateRect(state.window, null(), FALSE) };
+        return;
+    }
+    if state.timer_dirty || state.macro_dirty || state.profile_dirty {
+        state.settings_status_kind = StatusKind::Warning;
+        state.settings_status = "Simpan semua perubahan sebelum memasang update.".to_owned();
+        unsafe { InvalidateRect(state.window, null(), FALSE) };
+        return;
+    }
+    let Some(path) = state.update_installer_ready.as_ref() else {
+        return;
+    };
+    let Some(manifest) = state.update_available.as_ref() else {
+        return;
+    };
+    let confirmation = unsafe {
+        MessageBoxW(
+            state.window,
+            wide(&format!(
+                "Installer VibeTimer v{} sudah lolos verifikasi SHA-256. Jalankan installer dan tutup aplikasi sekarang?",
+                manifest.version
+            ))
+            .as_ptr(),
+            wide("Update VibeTimer terverifikasi").as_ptr(),
+            MB_YESNO | MB_ICONINFORMATION,
+        )
+    };
+    if confirmation != IDYES {
+        return;
+    }
+    match std::process::Command::new(path)
+        .arg("/CLOSEAPPLICATIONS")
+        .spawn()
+    {
+        Ok(_) => {
+            state.exit_requested = true;
+            unsafe { PostMessageW(state.window, WM_CLOSE, 0, 0) };
+        }
+        Err(error) => {
+            state.settings_status_kind = StatusKind::Error;
+            state.settings_status = format!("Installer update gagal dijalankan: {error}");
+            unsafe { InvalidateRect(state.window, null(), FALSE) };
         }
     }
 }
@@ -7494,6 +7826,45 @@ unsafe fn handle_click(state: &mut AppState, target: HitTarget) {
                 }
             }
         }
+        HitTarget::SettingUpdateChecks => {
+            let enabled = !state.settings.update_checks_enabled;
+            if enabled {
+                let Some(feed) = configured_feed_url() else {
+                    state.settings_status_kind = StatusKind::Warning;
+                    state.settings_status = "Auto-update belum dapat diaktifkan karena build ini belum memiliki feed rilis HTTPS.".to_owned();
+                    unsafe { InvalidateRect(state.window, null(), FALSE) };
+                    return;
+                };
+                if let Err(message) = validate_update_feed(&feed) {
+                    state.settings_status_kind = StatusKind::Error;
+                    state.settings_status = message.to_owned();
+                    unsafe { InvalidateRect(state.window, null(), FALSE) };
+                    return;
+                }
+            }
+            state.settings.update_checks_enabled = enabled;
+            unsafe {
+                persist_settings(
+                    state,
+                    if enabled {
+                        "Pemeriksaan update saat startup diaktifkan."
+                    } else {
+                        "Pemeriksaan update saat startup dinonaktifkan."
+                    },
+                )
+            };
+        }
+        HitTarget::SettingCheckUpdate => {
+            if !state.update_busy {
+                if state.update_installer_ready.is_some() {
+                    unsafe { launch_verified_update(state) };
+                } else if let Some(manifest) = state.update_available.clone() {
+                    unsafe { begin_update_download(state, manifest) };
+                } else {
+                    unsafe { begin_update_check(state) };
+                }
+            }
+        }
         HitTarget::SettingEmergencyHotkey(hotkey) => {
             let previous = state.settings.emergency_hotkey;
             state.settings.emergency_hotkey = hotkey;
@@ -7726,6 +8097,9 @@ unsafe extern "system" fn window_proc(
                 if state.timer_library.running_count() > 0 {
                     SetTimer(state.window, TIMER_COUNTDOWN, 100, null());
                 }
+                if state.settings.update_checks_enabled {
+                    begin_update_check(state);
+                }
             }
             0
         }
@@ -7904,6 +8278,55 @@ unsafe extern "system" fn window_proc(
                 state.macro_status_kind = StatusKind::Error;
                 state.macro_status =
                     "Macro kosong atau Windows menolak salah satu input.".to_owned();
+            }
+            unsafe { InvalidateRect(window, null(), FALSE) };
+            0
+        }
+        WM_APP_UPDATE_RESULT => {
+            if lparam == 0 {
+                return 0;
+            }
+            let result = unsafe { *Box::from_raw(lparam as *mut UpdateWorkerResult) };
+            state.update_busy = false;
+            match result {
+                UpdateWorkerResult::Current => {
+                    state.update_available = None;
+                    state.update_installer_ready = None;
+                    state.settings_status_kind = StatusKind::Sent;
+                    state.settings_status = format!(
+                        "VibeTimer v{} sudah merupakan versi terbaru.",
+                        env!("CARGO_PKG_VERSION")
+                    );
+                }
+                UpdateWorkerResult::Available(manifest) => {
+                    state.update_installer_ready = None;
+                    state.settings_status_kind = StatusKind::Warning;
+                    state.settings_status = format!(
+                        "VibeTimer v{} tersedia. Klik Unduh untuk melanjutkan.",
+                        manifest.version
+                    );
+                    unsafe {
+                        show_tray_notification(
+                            state,
+                            "Update VibeTimer tersedia",
+                            &format!("Versi {} siap diunduh dari tab Settings.", manifest.version),
+                        )
+                    };
+                    state.update_available = Some(manifest);
+                }
+                UpdateWorkerResult::InstallerReady(manifest, path) => {
+                    state.settings_status_kind = StatusKind::Sent;
+                    state.settings_status = format!(
+                        "Installer v{} lolos SHA-256. Klik Instal jika sudah siap.",
+                        manifest.version
+                    );
+                    state.update_available = Some(manifest);
+                    state.update_installer_ready = Some(path);
+                }
+                UpdateWorkerResult::Error(message) => {
+                    state.settings_status_kind = StatusKind::Error;
+                    state.settings_status = message;
+                }
             }
             unsafe { InvalidateRect(window, null(), FALSE) };
             0
@@ -8437,12 +8860,16 @@ mod windows_e2e_tests {
             let e2e_settings_path = PathBuf::from("qa/e2e-settings.vts");
             let e2e_timers_path = PathBuf::from("qa/e2e-timers.vtt");
             let e2e_backup_path = PathBuf::from("qa/e2e-backup.vtb");
+            let e2e_update_source_path = PathBuf::from("qa/e2e-update-source.exe");
+            let e2e_update_manifest_path = PathBuf::from("qa/e2e-update-manifest.vtu");
             for path in [
                 &e2e_profiles_path,
                 &e2e_profile_macros_path,
                 &e2e_settings_path,
                 &e2e_timers_path,
                 &e2e_backup_path,
+                &e2e_update_source_path,
+                &e2e_update_manifest_path,
             ] {
                 let _ = fs::remove_file(path);
             }
@@ -8509,6 +8936,8 @@ mod windows_e2e_tests {
             assert_eq!(hit_test(210, 200, state), HitTarget::SettingMinimizeTray);
             assert_eq!(hit_test(210, 260, state), HitTarget::SettingCloseTray);
             assert_eq!(hit_test(210, 320, state), HitTarget::SettingAutoStart);
+            assert_eq!(hit_test(210, 398, state), HitTarget::SettingUpdateChecks);
+            assert_eq!(hit_test(210, 450, state), HitTarget::SettingCheckUpdate);
             assert_eq!(
                 hit_test(600, 246, state),
                 HitTarget::SettingEmergencyHotkey(EmergencyHotkey::CtrlShiftF12)
@@ -8527,6 +8956,70 @@ mod windows_e2e_tests {
             handle_click(state, HitTarget::SettingAutoStart);
             assert!(!state.settings.auto_start);
             assert!(!TEST_AUTOSTART_ENABLED.load(Ordering::Acquire));
+
+            fs::write(&e2e_update_source_path, b"VibeTimer E2E installer")
+                .expect("artefak update E2E dibuat");
+            let update_digest = digest_hex(
+                &sha256_file(&e2e_update_source_path).expect("hash update E2E dihitung"),
+            );
+            let update_source_path = fs::canonicalize(&e2e_update_source_path)
+                .expect("path update E2E ditemukan")
+                .to_string_lossy()
+                .replace('\\', "/");
+            let update_source_path = update_source_path
+                .strip_prefix("//?/")
+                .unwrap_or(&update_source_path);
+            let update_source_url = format!("file:///{update_source_path}");
+            fs::write(
+                &e2e_update_manifest_path,
+                format!(
+                    "VIBETIMER-UPDATE-1\nversion=9.9.9\ninstaller={update_source_url}\nsha256={update_digest}\n"
+                ),
+            )
+            .expect("manifest update E2E dibuat");
+            let update_feed_path = fs::canonicalize(&e2e_update_manifest_path)
+                .expect("path manifest E2E ditemukan")
+                .to_string_lossy()
+                .replace('\\', "/");
+            let update_feed_path = update_feed_path
+                .strip_prefix("//?/")
+                .unwrap_or(&update_feed_path);
+            let update_feed_url = format!("file:///{update_feed_path}");
+            std::env::set_var("VIBETIMER_UPDATE_FEED_URL", update_feed_url);
+            state.settings.update_checks_enabled = false;
+            handle_click(state, HitTarget::SettingUpdateChecks);
+            assert!(state.settings.update_checks_enabled);
+            handle_click(state, HitTarget::SettingCheckUpdate);
+            let update_deadline = Instant::now() + Duration::from_secs(3);
+            while state.update_busy && Instant::now() < update_deadline {
+                pump_messages_for(Duration::from_millis(20));
+            }
+            assert_eq!(
+                state
+                    .update_available
+                    .as_ref()
+                    .map(|item| item.version.as_str()),
+                Some("9.9.9"),
+                "feed lokal harus menemukan versi baru; status: {}",
+                state.settings_status
+            );
+            handle_click(state, HitTarget::SettingCheckUpdate);
+            let download_deadline = Instant::now() + Duration::from_secs(3);
+            while state.update_busy && Instant::now() < download_deadline {
+                pump_messages_for(Duration::from_millis(20));
+            }
+            assert!(
+                state
+                    .update_installer_ready
+                    .as_ref()
+                    .is_some_and(|path| path.exists()),
+                "installer dengan SHA-256 benar harus siap"
+            );
+            handle_click(state, HitTarget::SettingCheckUpdate);
+            assert_eq!(state.settings_status_kind, StatusKind::Sent);
+            handle_click(state, HitTarget::SettingUpdateChecks);
+            assert!(!state.settings.update_checks_enabled);
+            std::env::remove_var("VIBETIMER_UPDATE_FEED_URL");
             handle_click(
                 state,
                 HitTarget::SettingEmergencyHotkey(EmergencyHotkey::CtrlShiftF12),
@@ -9426,11 +9919,18 @@ mod windows_e2e_tests {
                 e2e_settings_path,
                 e2e_timers_path,
                 e2e_backup_path,
+                e2e_update_source_path,
+                e2e_update_manifest_path,
             ] {
                 let _ = fs::remove_file(&path);
                 let _ = fs::remove_file(path.with_extension("tmp"));
                 let _ = fs::remove_file(path.with_extension("bak"));
             }
+            let update_cache = PathBuf::from("qa/updates");
+            let _ = fs::remove_file(update_cache.join("VibeTimer-Setup-9.9.9.exe"));
+            let _ = fs::remove_file(update_cache.join("VibeTimer-Setup-9.9.9.download"));
+            let _ = fs::remove_file(update_cache.join("manifest.vtu.tmp"));
+            let _ = fs::remove_dir(update_cache);
             DestroyWindow(target_window);
             DestroyWindow(main_window);
         }

@@ -1,140 +1,107 @@
-# VibeTimer — QA Evidence
+# VibeTimer 1.0 — QA Evidence
 
-Tanggal verifikasi: 2026-08-12
-Platform build: Windows x64, Rust 1.97.1
+Tanggal verifikasi: 12 Agustus 2026
+Platform: Windows x64, Rust 1.97.1, Inno Setup 7.0.2
 
-## Gerbang otomatis
+## Status gerbang final
 
 | Pemeriksaan | Hasil |
 |---|---|
 | `cargo fmt -- --check` | Lulus |
 | `cargo clippy --all-targets -- -D warnings` | Lulus, 0 warning |
-| `cargo test` | Lulus, 10 test (9 unit + 1 integration E2E) |
+| `cargo test --all-targets -- --test-threads=1` | Lulus, 31 unit + 2 Windows E2E |
 | `cargo build --release` | Lulus |
-| Ukuran `VibeTimer.exe` | 217.600 byte (212,5 KiB) |
-| Working set setelah startup | 12,55 MiB |
-| Private memory setelah startup | 2,09 MiB |
-| Handle setelah startup | 143 |
-| Status proses release | Responding / sehat |
+| Dependency runtime eksternal | Tidak ada |
+| Install → launch → uninstall | Lulus |
+| Microsoft Defender custom scan | Tidak ada threat pada EXE dan installer |
+| Authenticode artefak VibeTimer | `NotSigned` |
 
-## Cakupan test
+## Artefak final
 
-Sembilan unit test memeriksa validasi waktu serta model, serialisasi V2,
-migrasi file V1, validasi, default aman, dan penyimpanan atomik macro. Satu integration test Windows
-membuat UI VibeTimer dan jendela target dengan edit control sungguhan. Test itu
-menjalankan timer satu detik dalam mode **Teks + Enter** dan **Hanya Enter**,
-memverifikasi pembatalan tidak mengirim input, serta menolak PID target yang
-tidak cocok. Ketiga preset waktu dan seluruh hit-area Timer juga diuji.
+| Artefak | Ukuran | SHA-256 |
+|---|---:|---|
+| `target/release/VibeTimer.exe` | 388.608 byte | `E746F8C06D1411BE900669D78FFB3FAA42A2AB8D6644310941707E45BA1613BC` |
+| `dist/VibeTimer-Setup-1.0.0-x64.exe` | 2.440.989 byte | `8E2AFDC6B11CDB840F95CBD12E4E3975C159760189160976F01917268FE8DBBF` |
 
-Pada Macro Studio, E2E membuat dan memilih macro, mengubah empat mode, lima
-pemicu, dan tiga lane, membersihkan lane, merekam keyboard + klik + wheel,
-menghentikan recording dengan Esc, serta melakukan save/load file nyata.
-Playback **No Repeat** dijalankan melalui F8, Middle, Mouse 4, dan Mouse 5;
-F9 menjalankan **While Holding** serta **Toggle**; sedangkan **Sequence**
-memverifikasi On Press, While Holding, dan On Release.
+## Cakupan otomatis
 
-E2E 0.3 juga mengedit delay `25 → 73 → 83 → 73 ms`, menyimpan target berdasarkan
-executable + judul, dan memuatnya kembali. Toggle background mengirim klik serta
-keyboard berulang ke window target sementara window kerja kedua tetap aktif.
-Pemicu target-bound tidak memulai macro ketika window lain aktif, tetapi tetap
-dapat menghentikan Toggle yang sudah berjalan dari window lain.
-Ketika target dihancurkan saat loop berjalan, playback berhenti dan status
-berubah menjadi error; tidak ada fallback yang mengirim input ke window lain.
+Unit test mencakup validasi waktu, Smart Reset, version comparison, parser
+manifest HTTPS, SHA-256 known vectors, serialisasi dan migrasi state, CRC backup,
+penyimpanan atomik, recovery backup, timeline editing, batas library, batas
+delay, restart recovery timer, serta dua timer konkuren yang dispatch tepat satu
+kali per timer.
 
-## Matriks fungsi UI
+Windows E2E membuat UI dan target edit control sungguhan, lalu memverifikasi:
 
-| Fungsi terlihat | Verifikasi |
-|---|---|
-| Input jam/menit/detik + `+30 mnt`, `+1 jam`, `+3 jam` | Unit + E2E nilai akhir 04:30:00 |
-| Pilih dan validasi target | Window handle + PID diuji; target salah ditolak |
-| Hanya Enter / Teks + Enter | Kedua aksi diterima edit control Windows nyata |
-| Mulai / batalkan timer | Countdown selesai sekali; cancel mengirim 0 input |
-| Tab Timer / Macro | Hit-area dan resize native dijalankan dalam E2E |
-| Macro baru / pilih macro / edit nama | State pilihan dan nama tersimpan diverifikasi |
-| 4 mode macro | No Repeat, While Holding, Toggle, Sequence dijalankan |
-| 5 pemicu global | F8, F9, Middle, Mouse 4, Mouse 5 dipetakan dan dipicu |
-| 3 lane timeline | Pemilihan, clear, recording, dan Sequence diverifikasi |
-| Rekam / Esc untuk selesai | Key down/up, mouse down/up, wheel terekam |
-| Simpan | File ditulis atomik lalu dimuat ulang dan dibandingkan |
-| Edit chip `ms` | Pilih, input angka, ±10 ms, apply, save/load diverifikasi |
-| Global / Window Target | Kedua scope dapat dipilih dan tersimpan |
-| Toggle saat Alt+Tab | Target menerima loop; window kerja kedua tetap aktif |
-| Target ditutup | Loop berhenti aman dan tidak pindah ke window lain |
+- render tab Timer, Macro, Profiles, dan Settings;
+- Timer mode Enter serta Teks + Enter, cancel tanpa input, target PID salah;
+- Smart Reset dan Multi Timer;
+- macro recorder keyboard, mouse, wheel, dan `Esc`;
+- empat mode macro, lima pemicu, tiga lane, dan timeline editor;
+- playback Window Target tetap berjalan saat Alt+Tab tanpa mengubah foreground;
+- target yang ditutup menghentikan loop tanpa fallback ke window lain;
+- Tray Mode, Auto Start test double, dan Emergency Stop;
+- App Profiles, backup export/import, serta rollback state;
+- hook dinamis: tidak aktif untuk macro kosong, keduanya aktif saat recording,
+  lalu hanya hook yang diperlukan tetap terpasang;
+- updater lengkap dengan feed file lokal khusus `cfg(test)`: check → download →
+  SHA-256 → installer ready. Jalur production tetap HTTPS-only.
 
-Integration test juga menangkap enam artefak lokal di folder `qa/`:
+## E2E installer
 
-- `vibetimer-idle.bmp`
-- `vibetimer-running.bmp`
-- `e2e-target.bmp`
-- `vibetimer-macro.bmp`
-- `vibetimer-macro-empty.bmp`
-- `vibetimer-macro-targeted.bmp`
+Installer dibangun per-user dengan AppId stabil dan diuji pada root QA
+terisolasi:
 
-Folder tersebut sengaja diabaikan Git karena merupakan hasil test yang dapat
-dibuat ulang.
+1. install silent selesai dengan exit code 0;
+2. hash executable terpasang identik dengan executable release;
+3. aplikasi terpasang dapat berjalan dan responsive;
+4. instance kedua keluar dengan code 0 dan jumlah proses tetap satu;
+5. uninstaller selesai dengan exit code 0;
+6. direktori program terhapus;
+7. marker data pengguna tetap tersedia sesudah uninstall.
 
-## QA visual 0.3.0
+Wizard installer juga dibuka secara interaktif dan diperiksa pada resolusi asli.
+Hasilnya full dark, ikon VibeTimer benar, teks dan destination terbaca, serta
+tombol Back/Install/Cancel tidak bertabrakan.
 
-Snapshot idle, running, Macro berisi event, dan Macro empty-state dirender lewat
-`PrintWindow` dari aplikasi native yang sama, lalu diinspeksi pada resolusi asli.
-Redesign tetap menggunakan bahasa visual dark graphite: background hitam hangat,
-panel gelap berlapis tipis, acid-lime sebagai aksen interaksi, Segoe UI Variable
-Display, tab berbasis teks, serta pengurangan border dan nested-card. Tidak ada
-panel putih/ivory atau hover yang berubah putih. Tidak ada image asset yang
-dibakar ke UI; seluruh visual tetap GDI programatik.
+## Audit keamanan dan reliabilitas
 
-Inspector baru berada di kanan editor tanpa mengecilkan timeline: scope Global /
-Window, tombol pemilihan target, status Alt+Tab, dan editor delay memakai hierarki
-yang sama. Snapshot target-bound + delay terpilih diinspeksi pada resolusi asli.
+- Named mutex mencegah beberapa instance mengirim input bersamaan.
+- Clipboard reader dibatasi oleh ukuran alokasi dan terminator UTF-16.
+- File state memakai temporary file, `sync_all`, backup, dan rollback best-effort.
+- Import memvalidasi semua section sebelum mengganti state aktif.
+- ID, nama, target, jumlah object, dan delay divalidasi saat decode/encode.
+- Installer update tidak dapat dijalankan sebelum SHA-256 cocok.
+- Feed dan URL installer production wajib HTTPS.
+- Update ditolak ketika timer/macro/recording aktif atau perubahan belum disimpan.
+- Uninstaller hanya menghapus Run value jika command-nya tepat menunjuk instalasi
+  VibeTimer yang sedang dihapus.
+- `%LOCALAPPDATA%\VibeTimer` tidak menjadi target uninstall.
 
-SHA-256 release 0.3.0:
-`C2E066F93414A309C0F2ACF9A3F8E838952A4CDDAD2BD12CA2DBA5C754883669`.
+Microsoft Defender memindai `VibeTimer.exe` dan installer final dengan custom
+scan tanpa remediation. Keduanya selesai exit code 0 dan melaporkan tidak ada
+threat. Hasil ini terbatas pada engine/signature Defender saat pengujian dan
+bukan jaminan universal bahwa software bebas dari seluruh kemungkinan risiko.
 
-## Batas verifikasi sandbox
+## Performa profil kosong terisolasi
 
-Desktop test noninteraktif dapat menolak foreground/input global. Karena itu,
-binary test memiliki fallback **khusus `cfg(test)`** yang meneruskan input
-keyboard yang sama langsung ke edit control target bila `SendInput` ditolak.
+Pengukuran executable v1.0 final selama delapan detik, dengan data QA kosong dan
+update startup nonaktif:
 
-Executable release tidak memiliki fallback tersebut: ia memakai `SendInput`
-Windows asli dan gagal-aman bila input ditolak. Pengguna telah mengonfirmasi
-timer + auto Enter bekerja pada desktop interaktif pada 2026-08-09. Callback
-recorder, pemicu, playback, dan render Macro Studio sudah tercakup test E2E;
-smoke test fisik Mouse 4/5 tetap perlu dilakukan pada mouse pengguna karena
-desktop test tidak dapat menekan tombol fisik tersebut.
+| Metrik | Hasil |
+|---|---:|
+| CPU | 0,000% dari satu core |
+| Thread | 4 → 4 |
+| Handle | 146 → 146 |
+| Working set | 10,41 MiB |
+| Private memory | 1,86 MiB |
+| Status | Responsive |
 
-Jalur Window Target memakai `PostMessageW` ke receiver yang ditangkap, bukan
-fallback `SendInput`. E2E membuktikan receiver target mendapat event, active
-window kedua tidak berubah, koordinat klik relatif tersimpan, dan loop gagal
-aman ketika receiver ditutup. Kompatibilitas dengan game spesifik tetap harus
-diuji langsung karena sebagian engine mengabaikan background window message.
+## Risiko tersisa
 
-## Smoke test timer desktop interaktif
-
-1. Buka Notepad dan VibeTimer.
-2. Set timer ke `00:00:05`.
-3. Pilih target; saat VibeTimer mengecil, klik area ketik Notepad.
-4. Pastikan mode **Teks + Enter** dan isi `lanjutkan`.
-5. Mulai timer dan jangan menyentuh mouse sampai timer nol.
-6. Lulus bila Notepad menjadi foreground, berisi `lanjutkan`, dan caret berada
-   pada baris baru.
-
-## Smoke test macro fisik
-
-1. Buka Notepad dan VibeTimer, lalu buka tab **Macro**.
-2. Buat macro No Repeat, pilih `Mouse 4` atau `Mouse 5`, lalu rekam teks pendek
-   beserta Enter. Tekan `Esc`, lalu **Simpan**.
-3. Fokuskan Notepad dan tekan tombol mouse yang dipilih.
-4. Lulus bila macro berjalan sekali, urutan tombol benar, dan VibeTimer berubah
-   ke status **Terkirim**.
-
-## Smoke test Toggle Window Target
-
-1. Buka aplikasi/game target dan VibeTimer → **Macro**.
-2. Pilih **Window** → **Pilih window**, lalu klik area target yang akan menerima
-   klik berulang.
-3. Pilih **Toggle**, rekam klik, pilih chip delay dan atur misalnya `100 ms`,
-   lalu **Simpan**.
-4. Tekan pemicu sekali, kemudian Alt+Tab ke Notepad dan mengetik seperti biasa.
-5. Lulus bila target tetap menerima klik, Notepad tidak menerima klik/keyboard
-   dari macro, dan pemicu kedua menghentikan loop.
+- EXE dan installer belum ditandatangani. SmartScreen dapat memperingatkan
+  Unknown Publisher sampai tersedia sertifikat code-signing dan reputasi rilis.
+- Background macro bergantung pada dukungan window message aplikasi target.
+- Raw Input, DirectInput, anti-cheat, dan target elevated dapat menolak input.
+- Feed update online belum diaktifkan karena proyek belum memiliki URL rilis
+  HTTPS. Engine sudah ada, default off, dan tidak mengklaim update online aktif.

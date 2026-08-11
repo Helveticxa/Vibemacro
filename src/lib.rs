@@ -6,6 +6,7 @@ pub mod profiles;
 pub mod settings;
 pub mod smart_reset;
 pub mod timers;
+pub mod updater;
 
 pub const MAX_HOURS: u32 = 168;
 pub const MAX_TOTAL_SECONDS: u64 = 7 * 24 * 3_600;

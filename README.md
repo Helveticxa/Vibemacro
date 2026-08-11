@@ -1,104 +1,143 @@
-# VibeTimer
+# VibeTimer 1.0
 
-VibeTimer adalah utilitas Windows ringan untuk melanjutkan sesi AI setelah batas
-usage/credit kembali tersedia. Pengguna memilih jendela target, mengatur waktu
-tunggu, lalu VibeTimer mengirim **Enter saja** atau **teks + Enter** tepat ketika
-countdown mencapai nol.
+VibeTimer adalah utilitas Windows native yang melanjutkan sesi AI setelah usage
+limit reset dan menyediakan Macro Studio ringan untuk keyboard/mouse HID umum.
+UI memakai dark graphite dengan aksen acid-lime; aplikasi dibangun dengan Rust
+dan Win32 tanpa Electron, WebView, driver vendor, atau dependency runtime pihak
+ketiga.
 
-Versi 0.2 menambahkan **Macro Studio**: recorder keyboard/mouse global yang
-memberi fungsi macro bergaya Logitech G HUB pada mouse HID umum, tanpa
-memerlukan perangkat atau driver Logitech. UI dan branding tetap milik
-VibeTimer; tidak ada aset atau logo Logitech yang disalin.
+## Fitur utama
 
-Versi 0.2.2 memakai satu sistem visual dark graphite penuh: tidak ada lagi
-kanvas ivory, sementara acid-lime dibatasi untuk pilihan aktif, status, dan aksi
-utama. Timer dan Macro Editor tetap memiliki hierarki berbeda tanpa terasa
-seperti dua tema yang ditempel.
+- Timer satu kali dengan aksi **Hanya Enter** atau **Teks + Enter**.
+- Smart Reset untuk teks seperti `Resets in 3 h 27 min`, jam 12/24-hour,
+  nama hari, dan variasi bahasa Indonesia.
+- Maksimal enam timer konkuren yang persisten dan masing-masing hanya dispatch
+  satu kali.
+- Pemilihan target berdasarkan window handle, process ID, executable, dan judul.
+- Macro recorder untuk keyboard, klik, dan wheel dengan mode **No Repeat**,
+  **While Holding**, **Toggle**, dan **Sequence**.
+- Timeline editor: pilih event, ubah delay `0—60000 ms`, geser, duplikat,
+  hapus, dan sisipkan delay.
+- Pemicu `F8`, `F9`, `Middle`, `Mouse 4`, atau `Mouse 5`.
+- Window-bound background macro yang tetap berjalan pada target saat Alt+Tab,
+  tanpa mengambil fokus window aktif.
+- App Profiles untuk menyatukan target aplikasi dengan kumpulan macro.
+- Backup portable `.vtb` untuk settings, profiles, macros, dan timers.
+- Tray Mode, close/minimize-to-tray, dan Auto Start per-user.
+- Emergency Stop global yang dapat ikut membatalkan semua timer.
+- Batas durasi dan pengulangan macro agar loop tidak berjalan tanpa kendali.
+- Optional auto-update dengan manifest HTTPS dan verifikasi SHA-256 sebelum
+  installer dapat dijalankan.
 
-Versi 0.3 menambahkan editor delay per langkah dan **Window Target**. Macro
-Toggle dapat terus berjalan pada satu game/aplikasi saat pengguna Alt+Tab,
-tanpa mengirim klik atau tombol ke aplikasi yang sedang dipakai.
+## Instalasi
 
-## Kenapa Rust + Win32 native
+Jalankan `dist/VibeTimer-Setup-1.0.0-x64.exe`. Installer bersifat per-user,
+tidak meminta Administrator, membuat shortcut Start Menu, menyediakan shortcut
+Desktop opsional, dan mendukung upgrade in-place melalui AppId yang tetap.
 
-- Tidak memakai Electron, WebView2, Tauri, atau runtime tambahan.
-- Tidak memiliki dependency crate eksternal.
-- Satu executable native dengan penggunaan RAM rendah.
-- Teks dikirim sebagai Unicode melalui `SendInput`; clipboard pengguna tidak disentuh.
-- Recorder dan pemicu memakai low-level hook Win32. Playback global memakai
-  `SendInput`; playback Window Target memakai pesan window background tanpa
-  mengambil fokus.
+Data pribadi tidak dihapus saat uninstall dan berada di:
 
-## Alur penggunaan
+```text
+%LOCALAPPDATA%\VibeTimer
+```
 
-1. Isi jam, menit, dan detik sesuai waktu reset yang ditampilkan AI.
-2. Tekan **Pilih target**. Setelah dialog petunjuk ditutup, VibeTimer mengecil.
-3. Dalam tiga detik, klik jendela AI dan letakkan kursor di kolom inputnya.
-4. Pilih **Hanya Enter** atau **Teks + Enter**. Teks awalnya adalah `lanjutkan`.
-5. Tekan **Mulai timer**. VibeTimer melakukan aksi satu kali saat timer nol.
+Auto Start dapat diaktifkan dari tab **Settings** setelah instalasi.
 
-Target diverifikasi kembali berdasarkan window handle dan process ID sebelum
-pengiriman. Jika target ditutup atau berganti proses, VibeTimer memilih gagal
-aman dan tidak mengetik ke jendela lain.
+## Alur Timer dan Smart Reset
+
+1. Pilih salah satu timer pada rail kanan atau buat timer baru.
+2. Tempel teks reset pada Smart Reset, lalu tekan **Terapkan**, atau isi waktu
+   secara manual.
+3. Tekan **Pilih target** lalu klik kolom input aplikasi AI dalam tiga detik.
+4. Pilih **Hanya Enter** atau **Teks + Enter** dan isi prompt jika diperlukan.
+5. Tekan **Mulai timer**. Aksi hanya dikirim satu kali ketika timer mencapai nol.
+
+Jika aplikasi ditutup, timer masa depan dipulihkan saat startup. Timer yang
+sudah terlewat ditandai **Missed** dan tidak mengirim input secara diam-diam.
+Tombol clipboard Smart Reset hanya membaca ketika diminta dan tidak pernah
+menimpa isi clipboard.
 
 ## Alur Macro Studio
 
-1. Buka tab **Macro**, lalu pilih **Buat macro baru** atau macro yang sudah ada.
-2. Pilih tipe: **No Repeat**, **While Holding**, **Toggle**, atau **Sequence**.
-3. Pasang pemicu global: `F8`, `F9`, `Middle`, `Mouse 4`, atau `Mouse 5`.
-4. Pilih **Global** untuk mengikuti aplikasi aktif, atau **Window** lalu
-   **Pilih window** untuk mengikat macro ke satu aplikasi/game. Klik tepat pada
-   area yang harus menerima macro saat VibeTimer mengecil.
-5. Untuk Sequence, pilih lane **On Press**, **While Holding**, atau
-   **On Release** sebelum merekam.
-6. Tekan **Rekam input**. Lakukan kombinasi keyboard/klik/scroll yang diinginkan,
-   lalu tekan `Esc` untuk selesai. Delay nyata serta key/button down dan up ikut
-   direkam. Pada Window Target, posisi klik disimpan relatif terhadap window.
-7. Klik chip hijau `ms` untuk memilih delay. Isi angka `0—60000`, gunakan
-   tombol minus/plus untuk langkah 10 ms, lalu tekan **Terapkan ms**.
-8. Tekan **Simpan**. Macro tersimpan di
-   `%LOCALAPPDATA%\VibeTimer\macros.vtm` dan pemicunya aktif selama VibeTimer
-   berjalan.
+1. Pilih atau buat macro, kemudian tentukan mode dan pemicu.
+2. Pilih scope **Global** atau **Window**. Untuk Window, tekan **Pilih window**
+   dan klik target yang akan menerima macro.
+3. Untuk Sequence, pilih lane **Saat ditekan**, **Saat ditahan**, atau
+   **Saat dilepas**.
+4. Tekan **Rekam input**, lakukan rangkaian input, lalu tekan `Esc`.
+5. Edit chip delay, pindahkan/duplikat/hapus event bila perlu, lalu **Simpan**.
 
-Untuk macro yang harus berjalan terus, pilih **Toggle**. Tekan pemicu sekali
-untuk mulai dan sekali lagi untuk berhenti. Jika Window Target aktif, loop tetap
-terkirim ke target saat kamu Alt+Tab; window lain tidak menerima input macro.
-Pemicu awal hanya aktif ketika target sedang di depan, sehingga tombol yang sama
-tetap normal di aplikasi lain. Setelah Toggle berjalan, pemicu kedua boleh
-ditekan dari aplikasi mana pun untuk menghentikannya.
+Saat recording, input ditahan agar tidak ikut masuk ke aplikasi lain. Hindari
+mengetik password atau data sensitif selama recorder aktif. Untuk Toggle yang
+window-bound, pemicu awal hanya diterima ketika target berada di depan; setelah
+loop berjalan, pemicu yang sama dapat menghentikannya dari aplikasi lain.
 
-Saat recording, input keyboard dan mouse ditahan agar tidak ikut terkirim ke
-aplikasi lain. Hindari mengetik password atau data sensitif selama recorder
-aktif. Jika dua macro memakai pemicu yang sama, macro yang sedang dipilih
-mendapat prioritas; gunakan pemicu berbeda agar semua assignment dapat dipakai.
+## Profiles dan backup
+
+Satu App Profile menyimpan executable + judul target dan tautan ke beberapa
+macro. Target profil dapat disinkronkan ke macro terkait atau dipakai oleh Timer.
+Gunakan **Export backup** sebelum migrasi mesin dan **Import backup** untuk
+memulihkan state tervalidasi. Timer aktif dari backup selalu diimpor dalam
+keadaan berhenti agar tidak mengirim input tanpa persetujuan.
+
+## Settings dan keselamatan
+
+- **Minimize ke tray** dan **Tombol X tetap di tray** menjaga timer/macro aktif.
+- **Mulai bersama Windows** memakai registry Current User.
+- Emergency Stop default: `Ctrl + Alt + F12`.
+- Emergency Stop dapat membatalkan semua timer sekaligus.
+- Toggle memiliki batas durasi dan jumlah pengulangan yang dapat dimatikan
+  secara eksplisit.
+- Global hook hanya dipasang jika macro berisi aksi yang memerlukannya, dan
+  dilepas kembali ketika tidak digunakan.
+- Hanya satu instance VibeTimer yang dapat berjalan.
+
+## Update opsional
+
+Pemeriksaan update default-nya **nonaktif**. Build publik perlu menyediakan URL
+feed HTTPS saat kompilasi:
+
+```powershell
+$env:VIBETIMER_UPDATE_FEED_URL = 'https://example.com/vibetimer-update.txt'
+powershell -ExecutionPolicy Bypass -File .\tools\build-release.ps1
+```
+
+Manifest rilis dibuat setelah installer tersedia:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\write-update-manifest.ps1 `
+  -InstallerUrl 'https://example.com/VibeTimer-Setup-1.0.0-x64.exe'
+```
+
+Tanpa feed, UI menjelaskan bahwa update online belum dikonfigurasi dan upgrade
+manual melalui installer tetap bekerja. VibeTimer menolak HTTP, manifest rusak,
+versi tidak valid, installer kosong/terlalu besar, dan SHA-256 yang berbeda.
 
 ## Build dan test
 
+Persyaratan: Rust stable x64 MSVC dan Inno Setup 7 untuk installer.
+
 ```powershell
-cargo test
+cargo fmt -- --check
+cargo clippy --all-targets -- -D warnings
+cargo test --all-targets -- --test-threads=1
 cargo build --release
+powershell -ExecutionPolicy Bypass -File .\tools\build-release.ps1
 ```
 
-Executable hasil build berada di `target/release/VibeTimer.exe`.
+Artefak:
+
+- `target/release/VibeTimer.exe` — executable portable.
+- `dist/VibeTimer-Setup-1.0.0-x64.exe` — installer per-user.
 
 ## Batasan
 
-- Windows dapat memblokir input lintas level privilege. Jika target dijalankan
-  sebagai Administrator, jalankan VibeTimer dengan level yang sama.
-- Jendela target harus tetap terbuka. Letakkan fokus terakhir pada kolom input.
-- Timer adalah aksi satu kali; tidak ada retry otomatis agar perintah tidak
-  terkirim berulang tanpa sepengetahuan pengguna.
-- MVP belum membaca waktu reset secara otomatis dari layar karena format dan
-  aksesibilitas tiap aplikasi AI berbeda. Input manual lebih dapat diprediksi.
-- Pemicu macro bekerja pada aplikasi dengan level privilege yang sama. Aplikasi
-  Administrator dapat menolak input dari VibeTimer non-Administrator.
-- Window Target menggunakan pesan background Win32. Ini bekerja pada aplikasi
-  desktop, browser, dan game yang menerima window message, tetapi beberapa game
-  Raw Input/DirectInput atau anti-cheat dapat mengabaikannya. VibeTimer tidak
-  mencoba melewati proteksi tersebut.
-- Target dikenali kembali lewat nama executable + judul window. Jika judul game
-  berubah atau target memakai child window khusus, tekan **Ganti target**.
-- Macro lama otomatis dibaca dan dimigrasikan. Untuk klik background yang
-  presisi, pilih target lalu rekam ulang klik agar koordinat relatif tersimpan.
-- VibeTimer tidak dirancang untuk melewati anti-cheat, proteksi game, atau
-  pembatasan keamanan aplikasi lain.
+- Binary saat ini belum memiliki sertifikat code-signing; Windows SmartScreen
+  dapat menampilkan peringatan Unknown Publisher.
+- Windows dapat memblokir input menuju aplikasi dengan privilege lebih tinggi.
+- Beberapa game Raw Input/DirectInput atau anti-cheat mengabaikan background
+  window message. VibeTimer tidak mencoba melewati proteksi tersebut.
+- Window target harus tetap terbuka. Jika executable atau judul berubah, pilih
+  target lagi.
+- Kompatibilitas macro dengan aplikasi/game spesifik tetap perlu smoke test
+  langsung karena cara tiap aplikasi memproses input berbeda.
