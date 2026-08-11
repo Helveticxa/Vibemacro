@@ -1,6 +1,8 @@
 //! Logika murni VibeTimer yang dapat diuji tanpa Windows UI.
 
+pub mod backup;
 pub mod macro_engine;
+pub mod profiles;
 pub mod settings;
 
 pub const MAX_HOURS: u32 = 99;

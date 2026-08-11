@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::mem::{size_of, zeroed};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering};
 use std::thread;
@@ -12,10 +12,14 @@ use std::time::{Duration, Instant};
 #[cfg(test)]
 use std::sync::atomic::{AtomicIsize, AtomicUsize};
 
+use vibe_timer_core::backup::{BackupBundle, load_backup, save_backup};
 use vibe_timer_core::macro_engine::{
     MacroDefinition, MacroEvent, MacroLibrary, MacroMode, MacroTarget, MacroTrigger, MouseButton,
     default_data_path, delete_event, duplicate_event, insert_delay, load_library, move_event,
     save_library,
+};
+use vibe_timer_core::profiles::{
+    ProfileLibrary, default_profiles_path, load_profiles, save_profiles,
 };
 use vibe_timer_core::settings::{
     AppSettings, EmergencyHotkey, default_settings_path, load_settings, save_settings,
@@ -178,6 +182,10 @@ const MENU_EXIT: usize = 9_003;
 const HKEY_CURRENT_USER: isize = 0x8000_0001u32 as isize;
 #[cfg(not(test))]
 const REG_SZ: Dword = 1;
+const OFN_OVERWRITEPROMPT: Dword = 0x0000_0002;
+const OFN_PATHMUSTEXIST: Dword = 0x0000_0800;
+const OFN_FILEMUSTEXIST: Dword = 0x0000_1000;
+const OFN_EXPLORER: Dword = 0x0008_0000;
 #[cfg(test)]
 const ES_MULTILINE: Dword = 0x0004;
 #[cfg(test)]
@@ -202,6 +210,7 @@ const ICON_BIG: Wparam = 1;
 const CLIENT_WIDTH: i32 = 520;
 const MACRO_CLIENT_WIDTH: i32 = 1120;
 const SETTINGS_CLIENT_WIDTH: i32 = 820;
+const PROFILES_CLIENT_WIDTH: i32 = 900;
 const CLIENT_HEIGHT: i32 = 650;
 const MAX_RECORDED_EVENTS: usize = 10_000;
 const SWP_NOMOVE: Uint = 0x0002;
@@ -449,6 +458,33 @@ struct NotifyIconDataW {
     balloon_icon: Hicon,
 }
 
+#[repr(C)]
+struct OpenFileNameW {
+    size: Dword,
+    owner: Hwnd,
+    instance: Hinstance,
+    filter: *const u16,
+    custom_filter: *mut u16,
+    max_custom_filter: Dword,
+    filter_index: Dword,
+    file: *mut u16,
+    max_file: Dword,
+    file_title: *mut u16,
+    max_file_title: Dword,
+    initial_directory: *const u16,
+    title: *const u16,
+    flags: Dword,
+    file_offset: u16,
+    file_extension: u16,
+    default_extension: *const u16,
+    custom_data: Lparam,
+    hook: *const c_void,
+    template_name: *const u16,
+    reserved: *mut c_void,
+    reserved_value: Dword,
+    flags_ex: Dword,
+}
+
 impl Default for NotifyIconDataW {
     fn default() -> Self {
         unsafe { zeroed() }
@@ -585,6 +621,12 @@ unsafe extern "system" {
     fn Shell_NotifyIconW(message: Dword, data: *mut NotifyIconDataW) -> Bool;
 }
 
+#[link(name = "comdlg32")]
+unsafe extern "system" {
+    fn GetSaveFileNameW(data: *mut OpenFileNameW) -> Bool;
+    fn GetOpenFileNameW(data: *mut OpenFileNameW) -> Bool;
+}
+
 #[cfg(not(test))]
 #[link(name = "advapi32")]
 unsafe extern "system" {
@@ -708,6 +750,7 @@ enum ActionMode {
 enum AppTab {
     Timer,
     Macro,
+    Profiles,
     Settings,
 }
 
@@ -722,6 +765,7 @@ enum MacroLane {
 enum CaptureKind {
     Timer,
     Macro,
+    Profile,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -738,6 +782,7 @@ enum HitTarget {
     None,
     TimerTab,
     MacroTab,
+    ProfilesTab,
     SettingsTab,
     AddThirtyMinutes,
     AddOneHour,
@@ -776,6 +821,16 @@ enum HitTarget {
     SettingMaxRuntime(u32),
     SettingMaxRepeats(u32),
     SettingTestEmergency,
+    ProfileNew,
+    ProfileItem(usize),
+    ProfileDuplicate,
+    ProfileDelete,
+    ProfileTargetPick,
+    ProfileMacro(usize),
+    ProfileUseTimer,
+    ProfileSave,
+    BackupExport,
+    BackupImport,
 }
 
 #[derive(Clone)]
@@ -817,6 +872,7 @@ struct AppState {
     prompt_edit: Hwnd,
     macro_name_edit: Hwnd,
     macro_delay_edit: Hwnd,
+    profile_name_edit: Hwnd,
     edit_brush: Hbrush,
     panel_edit_brush: Hbrush,
     fonts: Fonts,
@@ -835,6 +891,12 @@ struct AppState {
     tracking_mouse: bool,
     macro_library: MacroLibrary,
     macro_path: PathBuf,
+    profile_library: ProfileLibrary,
+    profiles_path: PathBuf,
+    profile_status_kind: StatusKind,
+    profile_status: String,
+    profile_dirty: bool,
+    profile_targets: HashMap<u32, MacroPlaybackTarget>,
     settings: AppSettings,
     settings_path: PathBuf,
     settings_status_kind: StatusKind,
@@ -886,6 +948,22 @@ impl AppState {
                 format!("Pengaturan lama diabaikan: {error}"),
             ),
         };
+        let profiles_path = default_profiles_path();
+        let (mut profile_library, profile_status_kind, profile_status) =
+            match load_profiles(&profiles_path) {
+                Ok(profiles) => (
+                    profiles,
+                    StatusKind::Ready,
+                    "Profil siap. Pilih target lalu tautkan macro.".to_owned(),
+                ),
+                Err(error) => (
+                    ProfileLibrary::default(),
+                    StatusKind::Warning,
+                    format!("File profil tidak dapat dibaca: {error}"),
+                ),
+            };
+        let macro_ids: Vec<u32> = macro_library.macros.iter().map(|item| item.id).collect();
+        profile_library.remove_missing_macro_links(&macro_ids);
         Self {
             window: 0,
             tab: AppTab::Timer,
@@ -895,6 +973,7 @@ impl AppState {
             prompt_edit: 0,
             macro_name_edit: 0,
             macro_delay_edit: 0,
+            profile_name_edit: 0,
             edit_brush: 0,
             panel_edit_brush: 0,
             fonts: Fonts::default(),
@@ -913,6 +992,12 @@ impl AppState {
             tracking_mouse: false,
             macro_library,
             macro_path,
+            profile_library,
+            profiles_path,
+            profile_status_kind,
+            profile_status,
+            profile_dirty: false,
+            profile_targets: HashMap::new(),
             settings,
             settings_path,
             settings_status_kind,
@@ -963,6 +1048,14 @@ impl AppState {
                     SW_HIDE
                 },
             );
+            ShowWindow(
+                self.profile_name_edit,
+                if self.tab == AppTab::Profiles {
+                    SW_SHOWNORMAL
+                } else {
+                    SW_HIDE
+                },
+            );
         }
     }
 
@@ -978,6 +1071,7 @@ impl AppState {
                 self.macro_delay_edit,
                 if !self.recording { TRUE } else { FALSE },
             );
+            EnableWindow(self.profile_name_edit, TRUE);
         }
     }
 
@@ -1023,9 +1117,10 @@ const RECT_PICK_TARGET: Rect = Rect::new(358, 309, 474, 351);
 const RECT_MODE_ENTER: Rect = Rect::new(42, 424, 249, 462);
 const RECT_MODE_TEXT: Rect = Rect::new(251, 424, 458, 462);
 const RECT_MAIN_ACTION: Rect = Rect::new(24, 548, 496, 604);
-const RECT_TAB_TIMER: Rect = Rect::new(252, 24, 322, 54);
-const RECT_TAB_MACRO: Rect = Rect::new(326, 24, 396, 54);
-const RECT_TAB_SETTINGS: Rect = Rect::new(400, 24, 496, 54);
+const RECT_TAB_TIMER: Rect = Rect::new(202, 24, 258, 54);
+const RECT_TAB_MACRO: Rect = Rect::new(262, 24, 322, 54);
+const RECT_TAB_PROFILES: Rect = Rect::new(326, 24, 402, 54);
+const RECT_TAB_SETTINGS: Rect = Rect::new(406, 24, 496, 54);
 const RECT_MACRO_NEW: Rect = Rect::new(42, 117, 218, 157);
 const RECT_MACRO_MODE_NO_REPEAT: Rect = Rect::new(278, 173, 428, 239);
 const RECT_MACRO_MODE_HOLD: Rect = Rect::new(438, 173, 588, 239);
@@ -1067,6 +1162,14 @@ const RECT_SETTING_REPEAT_1000: Rect = Rect::new(522, 493, 598, 531);
 const RECT_SETTING_REPEAT_10000: Rect = Rect::new(606, 493, 682, 531);
 const RECT_SETTING_REPEAT_OFF: Rect = Rect::new(690, 493, 772, 531);
 const RECT_SETTING_TEST_EMERGENCY: Rect = Rect::new(24, 548, 796, 604);
+const RECT_PROFILE_NEW: Rect = Rect::new(42, 117, 218, 157);
+const RECT_PROFILE_DUPLICATE: Rect = Rect::new(42, 548, 126, 590);
+const RECT_PROFILE_DELETE: Rect = Rect::new(134, 548, 218, 590);
+const RECT_PROFILE_USE_TIMER: Rect = Rect::new(278, 242, 548, 282);
+const RECT_PROFILE_TARGET_PICK: Rect = Rect::new(560, 242, 850, 282);
+const RECT_PROFILE_EXPORT: Rect = Rect::new(278, 548, 446, 596);
+const RECT_PROFILE_IMPORT: Rect = Rect::new(456, 548, 624, 596);
+const RECT_PROFILE_SAVE: Rect = Rect::new(634, 548, 850, 596);
 
 fn macro_trigger_rect(index: usize) -> Rect {
     let left = 278 + index as i32 * 116;
@@ -1076,6 +1179,19 @@ fn macro_trigger_rect(index: usize) -> Rect {
 fn macro_item_rect(index: usize) -> Rect {
     let top = 169 + index as i32 * 58;
     Rect::new(42, top, 218, top + 48)
+}
+
+fn profile_item_rect(index: usize) -> Rect {
+    let top = 169 + index as i32 * 58;
+    Rect::new(42, top, 218, top + 48)
+}
+
+fn profile_macro_rect(index: usize) -> Rect {
+    let column = index % 2;
+    let row = index / 2;
+    let left = 278 + column as i32 * 286;
+    let top = 340 + row as i32 * 58;
+    Rect::new(left, top, left + 272, top + 48)
 }
 
 fn macro_event_rect(index: usize) -> Rect {
@@ -1115,6 +1231,9 @@ fn hit_test(x: i32, y: i32, state: &AppState) -> HitTarget {
     }
     if RECT_TAB_MACRO.contains(x, y) {
         return HitTarget::MacroTab;
+    }
+    if RECT_TAB_PROFILES.contains(x, y) {
+        return HitTarget::ProfilesTab;
     }
     if RECT_TAB_SETTINGS.contains(x, y) {
         return HitTarget::SettingsTab;
@@ -1161,6 +1280,35 @@ fn hit_test(x: i32, y: i32, state: &AppState) -> HitTarget {
         ] {
             if rect.contains(x, y) {
                 return target;
+            }
+        }
+        return HitTarget::None;
+    }
+    if state.tab == AppTab::Profiles {
+        if RECT_PROFILE_NEW.contains(x, y) {
+            return HitTarget::ProfileNew;
+        }
+        for (index, _) in state.profile_library.profiles.iter().take(6).enumerate() {
+            if profile_item_rect(index).contains(x, y) {
+                return HitTarget::ProfileItem(index);
+            }
+        }
+        for (rect, target) in [
+            (RECT_PROFILE_DUPLICATE, HitTarget::ProfileDuplicate),
+            (RECT_PROFILE_DELETE, HitTarget::ProfileDelete),
+            (RECT_PROFILE_TARGET_PICK, HitTarget::ProfileTargetPick),
+            (RECT_PROFILE_USE_TIMER, HitTarget::ProfileUseTimer),
+            (RECT_PROFILE_EXPORT, HitTarget::BackupExport),
+            (RECT_PROFILE_IMPORT, HitTarget::BackupImport),
+            (RECT_PROFILE_SAVE, HitTarget::ProfileSave),
+        ] {
+            if rect.contains(x, y) {
+                return target;
+            }
+        }
+        for (index, _) in state.macro_library.macros.iter().take(6).enumerate() {
+            if profile_macro_rect(index).contains(x, y) {
+                return HitTarget::ProfileMacro(index);
             }
         }
         return HitTarget::None;
@@ -1509,6 +1657,7 @@ unsafe fn draw_status_pill(dc: Hdc, state: &AppState) {
     let kind = match state.tab {
         AppTab::Timer => state.status_kind,
         AppTab::Macro => state.macro_status_kind,
+        AppTab::Profiles => state.profile_status_kind,
         AppTab::Settings => state.settings_status_kind,
     };
     let (label, dot_color, width) = match kind {
@@ -1521,6 +1670,7 @@ unsafe fn draw_status_pill(dc: Hdc, state: &AppState) {
     let right = match state.tab {
         AppTab::Timer => 496,
         AppTab::Macro => 1096,
+        AppTab::Profiles => 876,
         AppTab::Settings => 796,
     };
     let rect = Rect::new(right - width, 26, right, 50);
@@ -1552,6 +1702,12 @@ unsafe fn draw_tabs(dc: Hdc, state: &AppState) {
                 "Macro",
                 HitTarget::MacroTab,
                 state.tab == AppTab::Macro,
+            ),
+            (
+                RECT_TAB_PROFILES,
+                "Profiles",
+                HitTarget::ProfilesTab,
+                state.tab == AppTab::Profiles,
             ),
             (
                 RECT_TAB_SETTINGS,
@@ -2572,7 +2728,282 @@ unsafe fn draw_redesigned_interface(dc: Hdc, state: &AppState) {
     match state.tab {
         AppTab::Timer => unsafe { draw_timer_interface_v3(dc, state) },
         AppTab::Macro => unsafe { draw_macro_interface_v3(dc, state) },
+        AppTab::Profiles => unsafe { draw_profiles_interface(dc, state) },
         AppTab::Settings => unsafe { draw_settings_interface(dc, state) },
+    }
+}
+
+unsafe fn draw_profiles_interface(dc: Hdc, state: &AppState) {
+    unsafe {
+        fill_rect_color(
+            dc,
+            Rect::new(0, 0, PROFILES_CLIENT_WIDTH, CLIENT_HEIGHT),
+            COLOR_BG,
+        );
+        draw_brand_header_v3(dc, state);
+
+        rounded_box(
+            dc,
+            Rect::new(24, 84, 236, 608),
+            24,
+            COLOR_ACCENT,
+            COLOR_ACCENT,
+        );
+        draw_label(
+            dc,
+            &format!("PROFILES  /  {:02}", state.profile_library.profiles.len()),
+            Rect::new(42, 90, 218, 113),
+            COLOR_INK_MUTED,
+            state.fonts.small,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
+        draw_flat_button(
+            dc,
+            RECT_PROFILE_NEW,
+            "+  Profil baru",
+            COLOR_INK,
+            COLOR_TEXT,
+            state.hot == HitTarget::ProfileNew,
+            state.fonts.small,
+        );
+        for (index, profile) in state.profile_library.profiles.iter().take(6).enumerate() {
+            let rect = profile_item_rect(index);
+            let selected = profile.id == state.profile_library.selected_id;
+            if selected {
+                rounded_box(dc, rect, 14, COLOR_INK, COLOR_INK);
+            } else if index > 0 {
+                draw_hairline(
+                    dc,
+                    rect.left + 8,
+                    rect.top,
+                    rect.right - 8,
+                    rgb(167, 207, 52),
+                );
+            }
+            draw_label(
+                dc,
+                &profile.name,
+                Rect::new(rect.left + 14, rect.top + 5, rect.right - 10, rect.top + 29),
+                if selected { COLOR_TEXT } else { COLOR_INK },
+                state.fonts.semibold,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+            );
+            draw_label(
+                dc,
+                &format!("{} macro", profile.macro_ids.len()),
+                Rect::new(
+                    rect.left + 14,
+                    rect.top + 27,
+                    rect.right - 10,
+                    rect.bottom - 2,
+                ),
+                if selected {
+                    COLOR_ACCENT
+                } else {
+                    COLOR_INK_MUTED
+                },
+                state.fonts.small,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+            );
+        }
+        draw_flat_button(
+            dc,
+            RECT_PROFILE_DUPLICATE,
+            "Salin",
+            COLOR_INK,
+            COLOR_TEXT,
+            state.hot == HitTarget::ProfileDuplicate,
+            state.fonts.small,
+        );
+        draw_flat_button(
+            dc,
+            RECT_PROFILE_DELETE,
+            "Hapus",
+            COLOR_INK,
+            COLOR_ERROR,
+            state.hot == HitTarget::ProfileDelete,
+            state.fonts.small,
+        );
+
+        rounded_box(
+            dc,
+            Rect::new(252, 84, 876, 608),
+            24,
+            COLOR_PANEL,
+            COLOR_PANEL_BORDER,
+        );
+        draw_label(
+            dc,
+            "App Profile",
+            Rect::new(278, 96, 520, 120),
+            COLOR_MUTED,
+            state.fonts.small,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
+        let Some(profile) = state.profile_library.selected() else {
+            return;
+        };
+        rounded_box(
+            dc,
+            Rect::new(270, 121, 858, 164),
+            13,
+            COLOR_PANEL_2,
+            COLOR_PANEL_BORDER,
+        );
+        draw_label(
+            dc,
+            "TARGET APLIKASI",
+            Rect::new(278, 181, 520, 205),
+            COLOR_ACCENT,
+            state.fonts.small,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
+        let target_title = profile
+            .target
+            .as_ref()
+            .map(|target| target.window_title.as_str())
+            .unwrap_or("Belum memilih target");
+        let target_executable = profile
+            .target
+            .as_ref()
+            .map(|target| target.executable.as_str())
+            .unwrap_or("Pilih window aplikasi atau game");
+        draw_label(
+            dc,
+            target_title,
+            Rect::new(278, 203, 850, 226),
+            COLOR_TEXT,
+            state.fonts.semibold,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+        );
+        draw_label(
+            dc,
+            target_executable,
+            Rect::new(278, 224, 850, 243),
+            if profile.target.is_some() {
+                COLOR_MUTED
+            } else {
+                COLOR_DIM
+            },
+            state.fonts.small,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+        );
+        draw_flat_button(
+            dc,
+            RECT_PROFILE_USE_TIMER,
+            "Gunakan target untuk Timer",
+            COLOR_PANEL_2,
+            COLOR_TEXT,
+            state.hot == HitTarget::ProfileUseTimer,
+            state.fonts.small,
+        );
+        draw_flat_button(
+            dc,
+            RECT_PROFILE_TARGET_PICK,
+            if profile.target.is_some() {
+                "Ganti target window"
+            } else {
+                "Pilih target window"
+            },
+            if profile.target.is_some() {
+                COLOR_ACCENT
+            } else {
+                COLOR_PANEL_2
+            },
+            if profile.target.is_some() {
+                COLOR_INK
+            } else {
+                COLOR_TEXT
+            },
+            state.hot == HitTarget::ProfileTargetPick,
+            state.fonts.small,
+        );
+
+        draw_label(
+            dc,
+            "MACRO DALAM PROFIL",
+            Rect::new(278, 302, 620, 330),
+            COLOR_MUTED,
+            state.fonts.small,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
+        draw_label(
+            dc,
+            "Macro tertaut otomatis memakai target profil",
+            Rect::new(520, 302, 850, 330),
+            COLOR_DIM,
+            state.fonts.small,
+            DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
+        );
+        for (index, item) in state.macro_library.macros.iter().take(6).enumerate() {
+            let linked = profile.contains_macro(item.id);
+            let rect = profile_macro_rect(index);
+            draw_flat_button(
+                dc,
+                rect,
+                &format!(
+                    "{}    {}",
+                    item.name,
+                    if linked { "TERTAUT" } else { "+ TAUTKAN" }
+                ),
+                if linked {
+                    COLOR_ACCENT_DARK
+                } else {
+                    COLOR_PANEL_2
+                },
+                if linked { COLOR_ACCENT } else { COLOR_TEXT },
+                state.hot == HitTarget::ProfileMacro(index),
+                state.fonts.small,
+            );
+        }
+        draw_flat_button(
+            dc,
+            RECT_PROFILE_EXPORT,
+            "Export backup",
+            COLOR_PANEL_2,
+            COLOR_TEXT,
+            state.hot == HitTarget::BackupExport,
+            state.fonts.small,
+        );
+        draw_flat_button(
+            dc,
+            RECT_PROFILE_IMPORT,
+            "Import backup",
+            COLOR_PANEL_2,
+            COLOR_TEXT,
+            state.hot == HitTarget::BackupImport,
+            state.fonts.small,
+        );
+        draw_flat_button(
+            dc,
+            RECT_PROFILE_SAVE,
+            if state.profile_dirty {
+                "Simpan profil"
+            } else {
+                "Tersimpan"
+            },
+            COLOR_INK,
+            COLOR_TEXT,
+            state.hot == HitTarget::ProfileSave,
+            state.fonts.semibold,
+        );
+
+        let status_color = match state.profile_status_kind {
+            StatusKind::Ready => COLOR_MUTED,
+            StatusKind::Running => COLOR_ACCENT,
+            StatusKind::Sent => COLOR_SUCCESS,
+            StatusKind::Warning => COLOR_WARNING,
+            StatusKind::Error => COLOR_ERROR,
+        };
+        filled_circle(dc, Rect::new(260, 622, 268, 630), status_color);
+        draw_label(
+            dc,
+            &state.profile_status,
+            Rect::new(278, 610, 870, 642),
+            COLOR_MUTED,
+            state.fonts.small,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+        );
     }
 }
 
@@ -3567,6 +3998,22 @@ unsafe fn initialize_controls(state: &mut AppState, instance: Hinstance) {
             },
         );
         ShowWindow(state.macro_delay_edit, SW_HIDE);
+        let initial_profile_name = state
+            .profile_library
+            .selected()
+            .map(|profile| profile.name.clone())
+            .unwrap_or_else(|| "Profil".to_owned());
+        state.profile_name_edit = create_edit(
+            state.window,
+            instance,
+            EditSpec {
+                id: 107,
+                text: &initial_profile_name,
+                bounds: Rect::new(278, 130, 850, 158),
+                style: 0,
+            },
+        );
+        ShowWindow(state.profile_name_edit, SW_HIDE);
 
         for edit in [state.hour_edit, state.minute_edit, state.second_edit] {
             SendMessageW(
@@ -3629,6 +4076,20 @@ unsafe fn initialize_controls(state: &mut AppState, instance: Hinstance) {
             (4 | (4 << 16)) as Lparam,
         );
         SetWindowTheme(state.macro_delay_edit, dark.as_ptr(), null());
+        SendMessageW(
+            state.profile_name_edit,
+            WM_SETFONT,
+            state.fonts.semibold as Wparam,
+            TRUE as Lparam,
+        );
+        SendMessageW(state.profile_name_edit, EM_SETLIMITTEXT, 80, 0);
+        SendMessageW(
+            state.profile_name_edit,
+            EM_SETMARGINS,
+            EC_LEFTMARGIN | EC_RIGHTMARGIN,
+            (8 | (8 << 16)) as Lparam,
+        );
+        SetWindowTheme(state.profile_name_edit, dark.as_ptr(), null());
     }
 }
 
@@ -3803,6 +4264,150 @@ unsafe fn show_tray_menu(state: &AppState) {
         );
         DestroyMenu(menu);
     }
+}
+
+unsafe fn choose_backup_path(window: Hwnd, save: bool) -> Option<PathBuf> {
+    let mut file = [0u16; 32_768];
+    if save {
+        copy_wide(&mut file, "VibeTimer-backup.vtb");
+    }
+    let filter = wide("VibeTimer Backup (*.vtb)\0*.vtb\0Semua file (*.*)\0*.*\0");
+    let title = wide(if save {
+        "Export backup VibeTimer"
+    } else {
+        "Import backup VibeTimer"
+    });
+    let extension = wide("vtb");
+    let mut data = OpenFileNameW {
+        size: size_of::<OpenFileNameW>() as Dword,
+        owner: window,
+        instance: 0,
+        filter: filter.as_ptr(),
+        custom_filter: null_mut(),
+        max_custom_filter: 0,
+        filter_index: 1,
+        file: file.as_mut_ptr(),
+        max_file: file.len() as Dword,
+        file_title: null_mut(),
+        max_file_title: 0,
+        initial_directory: null(),
+        title: title.as_ptr(),
+        flags: OFN_EXPLORER
+            | OFN_PATHMUSTEXIST
+            | if save {
+                OFN_OVERWRITEPROMPT
+            } else {
+                OFN_FILEMUSTEXIST
+            },
+        file_offset: 0,
+        file_extension: 0,
+        default_extension: extension.as_ptr(),
+        custom_data: 0,
+        hook: null(),
+        template_name: null(),
+        reserved: null_mut(),
+        reserved_value: 0,
+        flags_ex: 0,
+    };
+    let accepted = if save {
+        unsafe { GetSaveFileNameW(&mut data) }
+    } else {
+        unsafe { GetOpenFileNameW(&mut data) }
+    };
+    if accepted == FALSE {
+        return None;
+    }
+    let length = file
+        .iter()
+        .position(|value| *value == 0)
+        .unwrap_or(file.len());
+    Some(PathBuf::from(String::from_utf16_lossy(&file[..length])))
+}
+
+fn synchronize_all_profile_targets(profiles: &ProfileLibrary, macros: &mut MacroLibrary) {
+    for profile in &profiles.profiles {
+        let Some(target) = profile.target.as_ref() else {
+            continue;
+        };
+        for item in &mut macros.macros {
+            if profile.contains_macro(item.id) {
+                item.target = Some(target.clone());
+            }
+        }
+    }
+}
+
+unsafe fn export_backup_to_path(state: &mut AppState, path: &Path) {
+    let bundle = BackupBundle::new(
+        state.macro_library.clone(),
+        state.profile_library.clone(),
+        state.settings.clone(),
+    );
+    match save_backup(path, &bundle) {
+        Ok(()) => {
+            state.profile_status_kind = StatusKind::Sent;
+            state.profile_status = format!(
+                "Backup tersimpan: {}",
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("VibeTimer-backup.vtb")
+            );
+        }
+        Err(error) => {
+            state.profile_status_kind = StatusKind::Error;
+            state.profile_status = format!("Export backup gagal: {error}");
+        }
+    }
+    unsafe { InvalidateRect(state.window, null(), FALSE) };
+}
+
+unsafe fn import_backup_from_path(state: &mut AppState, path: &Path) {
+    let mut bundle = match load_backup(path) {
+        Ok(bundle) => bundle,
+        Err(error) => {
+            state.profile_status_kind = StatusKind::Error;
+            state.profile_status = format!("Import ditolak: {error}");
+            unsafe { InvalidateRect(state.window, null(), FALSE) };
+            return;
+        }
+    };
+    let available_ids: Vec<u32> = bundle.macros.macros.iter().map(|item| item.id).collect();
+    bundle.profiles.remove_missing_macro_links(&available_ids);
+    synchronize_all_profile_targets(&bundle.profiles, &mut bundle.macros);
+    let save_result = save_library(&state.macro_path, &bundle.macros)
+        .and_then(|_| save_profiles(&state.profiles_path, &bundle.profiles))
+        .and_then(|_| save_settings(&state.settings_path, &bundle.settings));
+    if let Err(error) = save_result {
+        state.profile_status_kind = StatusKind::Error;
+        state.profile_status = format!("Import valid tetapi gagal disimpan: {error}");
+        unsafe { InvalidateRect(state.window, null(), FALSE) };
+        return;
+    }
+    state.macro_library = bundle.macros;
+    state.profile_library = bundle.profiles;
+    state.settings = bundle.settings;
+    state.macro_targets.clear();
+    state.profile_targets.clear();
+    state.macro_dirty = false;
+    state.profile_dirty = false;
+    let _ = unsafe { configure_auto_start(state.settings.auto_start) };
+    if let Err(message) = unsafe { register_emergency_hotkey(state) } {
+        state.settings_status_kind = StatusKind::Warning;
+        state.settings_status = message;
+    }
+    unsafe {
+        sync_macro_name_edit(state);
+        sync_profile_name_edit(state);
+        sync_delay_edit(state);
+    }
+    state.profile_status_kind = StatusKind::Sent;
+    state.profile_status = format!(
+        "Backup {} berhasil diimpor dan divalidasi.",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("VibeTimer")
+    );
+    unsafe { InvalidateRect(state.window, null(), FALSE) };
 }
 
 unsafe fn emergency_stop(state: &mut AppState, source: &str) {
@@ -4078,6 +4683,33 @@ unsafe fn begin_macro_target_capture(state: &mut AppState) {
     }
 }
 
+unsafe fn begin_profile_target_capture(state: &mut AppState) {
+    if state.profile_library.selected().is_none() {
+        return;
+    }
+    let instruction = "Setelah menekan OK, VibeTimer mengecil selama 3 detik.\n\nKlik area aplikasi atau game untuk profil ini. Semua macro yang ditautkan akan memakai target yang sama.";
+    let response = unsafe {
+        MessageBoxW(
+            state.window,
+            wide(instruction).as_ptr(),
+            wide("Pilih target App Profile").as_ptr(),
+            MB_OKCANCEL | MB_ICONINFORMATION,
+        )
+    };
+    if response != IDOK {
+        return;
+    }
+    state.capture_kind = CaptureKind::Profile;
+    state.capture_deadline = Some(Instant::now() + Duration::from_secs(3));
+    state.profile_status_kind = StatusKind::Warning;
+    state.profile_status = "Klik area aplikasi target dalam 3 detik…".to_owned();
+    unsafe {
+        InvalidateRect(state.window, null(), FALSE);
+        ShowWindow(state.window, SW_MINIMIZE);
+        SetTimer(state.window, TIMER_CAPTURE, 100, null());
+    }
+}
+
 unsafe fn finish_macro_target_capture(state: &mut AppState) {
     unsafe {
         KillTimer(state.window, TIMER_CAPTURE);
@@ -4152,6 +4784,75 @@ unsafe fn finish_macro_target_capture(state: &mut AppState) {
             executable
         );
         InvalidateRect(state.window, null(), FALSE);
+    }
+}
+
+unsafe fn finish_profile_target_capture(state: &mut AppState) {
+    unsafe {
+        KillTimer(state.window, TIMER_CAPTURE);
+        state.capture_deadline = None;
+        let mut cursor = Point::default();
+        let has_cursor = GetCursorPos(&mut cursor) != FALSE;
+        let pointed_window = if has_cursor {
+            WindowFromPoint(cursor)
+        } else {
+            0
+        };
+        let root = GetForegroundWindow();
+        let receiver = if pointed_window != 0 && GetAncestor(pointed_window, GA_ROOT) == root {
+            pointed_window
+        } else {
+            root
+        };
+        ShowWindow(state.window, SW_RESTORE);
+        SetForegroundWindow(state.window);
+        if root == 0 || receiver == 0 || root == state.window || IsWindowVisible(root) == FALSE {
+            state.profile_status_kind = StatusKind::Error;
+            state.profile_status = "Target profil tidak tertangkap. Coba pilih ulang.".to_owned();
+            InvalidateRect(state.window, null(), FALSE);
+            return;
+        }
+        let title = get_window_text(root);
+        let mut process_id = 0;
+        GetWindowThreadProcessId(root, &mut process_id);
+        let executable = match process_executable_name(process_id) {
+            Ok(value) if !value.is_empty() => value,
+            _ => {
+                state.profile_status_kind = StatusKind::Error;
+                state.profile_status =
+                    "Executable target profil tidak dapat diverifikasi.".to_owned();
+                InvalidateRect(state.window, null(), FALSE);
+                return;
+            }
+        };
+        if title.trim().is_empty() {
+            state.profile_status_kind = StatusKind::Error;
+            state.profile_status = "Window target profil tidak memiliki judul.".to_owned();
+            InvalidateRect(state.window, null(), FALSE);
+            return;
+        }
+        let selected_id = state.profile_library.selected_id;
+        if let Some(profile) = state.profile_library.selected_mut() {
+            profile.target = Some(MacroTarget {
+                executable: executable.clone(),
+                window_title: title.clone(),
+            });
+        }
+        state.profile_targets.insert(
+            selected_id,
+            MacroPlaybackTarget {
+                root,
+                receiver,
+                process_id,
+                title: title.clone(),
+            },
+        );
+        apply_selected_profile_target_to_linked_macros(state);
+        state.profile_dirty = true;
+        persist_profiles_and_macros(
+            state,
+            &format!("Target {executable} dipasang ke profil dan macro tertaut."),
+        );
     }
 }
 
@@ -4644,6 +5345,7 @@ unsafe fn resize_for_tab(state: &AppState) {
     let client_width = match state.tab {
         AppTab::Timer => CLIENT_WIDTH,
         AppTab::Macro => MACRO_CLIENT_WIDTH,
+        AppTab::Profiles => PROFILES_CLIENT_WIDTH,
         AppTab::Settings => SETTINGS_CLIENT_WIDTH,
     };
     let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
@@ -4671,6 +5373,67 @@ unsafe fn sync_macro_name_edit(state: &AppState) {
     unsafe { SetWindowTextW(state.macro_name_edit, wide(name).as_ptr()) };
 }
 
+unsafe fn sync_profile_name_edit(state: &AppState) {
+    let name = state
+        .profile_library
+        .selected()
+        .map(|profile| profile.name.as_str())
+        .unwrap_or("Profil");
+    unsafe { SetWindowTextW(state.profile_name_edit, wide(name).as_ptr()) };
+}
+
+fn apply_selected_profile_target_to_linked_macros(state: &mut AppState) {
+    let Some(profile) = state.profile_library.selected() else {
+        return;
+    };
+    let Some(target) = profile.target.clone() else {
+        return;
+    };
+    let linked = profile.macro_ids.clone();
+    for item in &mut state.macro_library.macros {
+        if linked.contains(&item.id) {
+            item.target = Some(target.clone());
+            state.macro_targets.remove(&item.id);
+        }
+    }
+}
+
+unsafe fn persist_profiles_and_macros(state: &mut AppState, message: &str) -> bool {
+    let profiles_result = save_profiles(&state.profiles_path, &state.profile_library);
+    let macros_result = save_library(&state.macro_path, &state.macro_library);
+    match profiles_result.and(macros_result) {
+        Ok(()) => {
+            state.profile_dirty = false;
+            state.macro_dirty = false;
+            state.profile_status_kind = StatusKind::Sent;
+            state.profile_status = message.to_owned();
+            unsafe { InvalidateRect(state.window, null(), FALSE) };
+            true
+        }
+        Err(error) => {
+            state.profile_status_kind = StatusKind::Error;
+            state.profile_status = format!("Profil gagal disimpan: {error}");
+            unsafe { InvalidateRect(state.window, null(), FALSE) };
+            false
+        }
+    }
+}
+
+unsafe fn save_current_profile(state: &mut AppState) {
+    let name = unsafe { get_window_text(state.profile_name_edit) };
+    if name.trim().is_empty() {
+        state.profile_status_kind = StatusKind::Error;
+        state.profile_status = "Nama profil tidak boleh kosong.".to_owned();
+        unsafe { InvalidateRect(state.window, null(), FALSE) };
+        return;
+    }
+    if let Some(profile) = state.profile_library.selected_mut() {
+        profile.name = name.trim().to_owned();
+    }
+    state.profile_dirty = true;
+    unsafe { persist_profiles_and_macros(state, "Profil dan tautan macro tersimpan.") };
+}
+
 unsafe fn switch_tab(state: &mut AppState, tab: AppTab) {
     if state.tab == tab {
         return;
@@ -4681,6 +5444,21 @@ unsafe fn switch_tab(state: &mut AppState, tab: AppTab) {
     state.tab = tab;
     state.hot = HitTarget::None;
     unsafe {
+        if state.tab == AppTab::Profiles {
+            sync_profile_name_edit(state);
+            let selected_id = state.profile_library.selected_id;
+            if let Some(specification) = state
+                .profile_library
+                .selected()
+                .and_then(|profile| profile.target.clone())
+            {
+                if let Ok(target) = find_saved_macro_target(&specification) {
+                    state.profile_targets.insert(selected_id, target);
+                } else {
+                    state.profile_targets.remove(&selected_id);
+                }
+            }
+        }
         resize_for_tab(state);
         state.set_controls_visible(!state.running);
         state.set_prompt_enabled();
@@ -5337,11 +6115,46 @@ unsafe fn confirm_delete_macro(window: Hwnd, name: &str) -> bool {
     }
 }
 
+unsafe fn confirm_delete_profile(window: Hwnd, name: &str) -> bool {
+    #[cfg(test)]
+    {
+        let _ = (window, name);
+        true
+    }
+    #[cfg(not(test))]
+    unsafe {
+        MessageBoxW(
+            window,
+            wide(&format!("Hapus profil ‘{name}’? Macro tidak ikut dihapus.")).as_ptr(),
+            wide("Hapus App Profile").as_ptr(),
+            MB_YESNO | MB_ICONWARNING,
+        ) == IDYES
+    }
+}
+
+unsafe fn confirm_import_backup(window: Hwnd) -> bool {
+    #[cfg(test)]
+    {
+        let _ = window;
+        true
+    }
+    #[cfg(not(test))]
+    unsafe {
+        MessageBoxW(
+            window,
+            wide("Import akan mengganti macro, profil, dan Settings saat ini. Lanjutkan?").as_ptr(),
+            wide("Import backup VibeTimer").as_ptr(),
+            MB_YESNO | MB_ICONWARNING,
+        ) == IDYES
+    }
+}
+
 unsafe fn handle_click(state: &mut AppState, target: HitTarget) {
     match target {
         HitTarget::None => {}
         HitTarget::TimerTab => unsafe { switch_tab(state, AppTab::Timer) },
         HitTarget::MacroTab => unsafe { switch_tab(state, AppTab::Macro) },
+        HitTarget::ProfilesTab => unsafe { switch_tab(state, AppTab::Profiles) },
         HitTarget::SettingsTab => unsafe { switch_tab(state, AppTab::Settings) },
         HitTarget::AddThirtyMinutes => unsafe { add_preset(state, 30 * 60) },
         HitTarget::AddOneHour => unsafe { add_preset(state, 60 * 60) },
@@ -5606,6 +6419,14 @@ unsafe fn handle_click(state: &mut AppState, target: HitTarget) {
                     && state.macro_library.delete_selected()
                 {
                     state.macro_targets.remove(&id);
+                    let macro_ids: Vec<u32> = state
+                        .macro_library
+                        .macros
+                        .iter()
+                        .map(|item| item.id)
+                        .collect();
+                    state.profile_library.remove_missing_macro_links(&macro_ids);
+                    let _ = save_profiles(&state.profiles_path, &state.profile_library);
                     state.macro_lane = MacroLane::OnPress;
                     state.macro_selected_event = None;
                     state.macro_dirty = true;
@@ -5711,6 +6532,145 @@ unsafe fn handle_click(state: &mut AppState, target: HitTarget) {
             unsafe { persist_settings(state, "Batas pengulangan macro diperbarui.") };
         }
         HitTarget::SettingTestEmergency => unsafe { emergency_stop(state, "tombol Settings") },
+        HitTarget::ProfileNew => {
+            state.profile_library.add_profile();
+            state.profile_dirty = true;
+            state.profile_status_kind = StatusKind::Ready;
+            state.profile_status = "Profil baru dibuat. Beri nama dan pilih target.".to_owned();
+            unsafe {
+                sync_profile_name_edit(state);
+                InvalidateRect(state.window, null(), FALSE);
+            }
+        }
+        HitTarget::ProfileItem(index) => {
+            if let Some(profile) = state.profile_library.profiles.get(index) {
+                state.profile_library.selected_id = profile.id;
+                state.profile_status_kind = StatusKind::Ready;
+                state.profile_status = format!("Mengedit {}.", profile.name);
+                unsafe {
+                    sync_profile_name_edit(state);
+                    InvalidateRect(state.window, null(), FALSE);
+                }
+            }
+        }
+        HitTarget::ProfileDuplicate => {
+            if state.profile_library.duplicate_selected().is_some() {
+                state.profile_dirty = true;
+                state.profile_status_kind = StatusKind::Ready;
+                state.profile_status = "Profil disalin. Ubah nama lalu simpan.".to_owned();
+                unsafe {
+                    sync_profile_name_edit(state);
+                    InvalidateRect(state.window, null(), FALSE);
+                }
+            }
+        }
+        HitTarget::ProfileDelete => {
+            let selected = state
+                .profile_library
+                .selected()
+                .map(|profile| (profile.id, profile.name.clone()));
+            if let Some((id, name)) = selected
+                && unsafe { confirm_delete_profile(state.window, &name) }
+                && state.profile_library.delete_selected()
+            {
+                state.profile_targets.remove(&id);
+                state.profile_dirty = true;
+                state.profile_status_kind = StatusKind::Warning;
+                state.profile_status = format!("Profil {name} dihapus. Macro tetap tersedia.");
+                unsafe {
+                    sync_profile_name_edit(state);
+                    persist_profiles_and_macros(state, "Profil dihapus dan library diperbarui.");
+                }
+            } else if state.profile_library.profiles.len() <= 1 {
+                state.profile_status_kind = StatusKind::Warning;
+                state.profile_status = "Minimal satu profil harus tetap tersedia.".to_owned();
+                unsafe { InvalidateRect(state.window, null(), FALSE) };
+            }
+        }
+        HitTarget::ProfileTargetPick => unsafe { begin_profile_target_capture(state) },
+        HitTarget::ProfileMacro(index) => {
+            let Some(macro_id) = state.macro_library.macros.get(index).map(|item| item.id) else {
+                return;
+            };
+            let Some(target_specification) = state
+                .profile_library
+                .selected()
+                .and_then(|profile| profile.target.clone())
+            else {
+                state.profile_status_kind = StatusKind::Error;
+                state.profile_status = "Pilih target profil sebelum menautkan macro.".to_owned();
+                unsafe { InvalidateRect(state.window, null(), FALSE) };
+                return;
+            };
+            let linked = state
+                .profile_library
+                .selected_mut()
+                .is_some_and(|profile| profile.toggle_macro(macro_id));
+            if linked
+                && let Some(item) = state
+                    .macro_library
+                    .macros
+                    .iter_mut()
+                    .find(|item| item.id == macro_id)
+            {
+                item.target = Some(target_specification);
+                state.macro_targets.remove(&macro_id);
+            }
+            state.profile_dirty = true;
+            state.macro_dirty = true;
+            unsafe {
+                persist_profiles_and_macros(
+                    state,
+                    if linked {
+                        "Macro ditautkan dan targetnya disinkronkan."
+                    } else {
+                        "Tautan dilepas; target macro yang aman tetap dipertahankan."
+                    },
+                )
+            };
+        }
+        HitTarget::ProfileUseTimer => {
+            let Some(specification) = state
+                .profile_library
+                .selected()
+                .and_then(|profile| profile.target.clone())
+            else {
+                state.profile_status_kind = StatusKind::Error;
+                state.profile_status = "Profil belum memiliki target.".to_owned();
+                unsafe { InvalidateRect(state.window, null(), FALSE) };
+                return;
+            };
+            if let Ok(target) = unsafe { find_saved_macro_target(&specification) } {
+                state.target = Some(TargetWindow {
+                    window: target.root,
+                    process_id: target.process_id,
+                    title: target.title.clone(),
+                });
+                state
+                    .profile_targets
+                    .insert(state.profile_library.selected_id, target);
+                state.profile_status_kind = StatusKind::Sent;
+                state.profile_status = "Target profil dipasang ke Timer.".to_owned();
+            } else {
+                state.profile_status_kind = StatusKind::Error;
+                state.profile_status =
+                    "Aplikasi profil belum terbuka atau judul window berubah.".to_owned();
+            }
+            unsafe { InvalidateRect(state.window, null(), FALSE) };
+        }
+        HitTarget::ProfileSave => unsafe { save_current_profile(state) },
+        HitTarget::BackupExport => {
+            if let Some(path) = unsafe { choose_backup_path(state.window, true) } {
+                unsafe { export_backup_to_path(state, &path) };
+            }
+        }
+        HitTarget::BackupImport => {
+            if let Some(path) = unsafe { choose_backup_path(state.window, false) }
+                && unsafe { confirm_import_backup(state.window) }
+            {
+                unsafe { import_backup_from_path(state, &path) };
+            }
+        }
     }
 }
 
@@ -5792,7 +6752,9 @@ unsafe extern "system" fn window_proc(
         }
         WM_CTLCOLOREDIT | WM_CTLCOLORSTATIC => {
             let dc = wparam as Hdc;
-            let panel_editor = lparam == state.macro_name_edit || lparam == state.macro_delay_edit;
+            let panel_editor = lparam == state.macro_name_edit
+                || lparam == state.macro_delay_edit
+                || lparam == state.profile_name_edit;
             unsafe {
                 SetTextColor(
                     dc,
@@ -5871,6 +6833,10 @@ unsafe extern "system" fn window_proc(
                 state.macro_dirty = true;
                 unsafe { InvalidateRect(window, null(), FALSE) };
             }
+            if control_id == 107 && notification == 0x0300 && state.tab == AppTab::Profiles {
+                state.profile_dirty = true;
+                unsafe { InvalidateRect(window, null(), FALSE) };
+            }
             match wparam & 0xFFFF {
                 MENU_OPEN => unsafe { restore_from_tray(state) },
                 MENU_STOP_ALL => unsafe { emergency_stop(state, "menu tray") },
@@ -5937,6 +6903,7 @@ unsafe extern "system" fn window_proc(
                 match state.capture_kind {
                     CaptureKind::Timer => unsafe { finish_target_capture(state) },
                     CaptureKind::Macro => unsafe { finish_macro_target_capture(state) },
+                    CaptureKind::Profile => unsafe { finish_profile_target_capture(state) },
                 }
             }
             0
@@ -5977,6 +6944,20 @@ unsafe extern "system" fn window_proc(
                         wide("Ada perubahan macro yang belum disimpan. Tutup tanpa menyimpan?")
                             .as_ptr(),
                         wide("Macro belum disimpan").as_ptr(),
+                        MB_YESNO | MB_ICONWARNING,
+                    )
+                };
+                if response != IDYES {
+                    return 0;
+                }
+            }
+            if state.profile_dirty {
+                let response = unsafe {
+                    MessageBoxW(
+                        window,
+                        wide("Ada perubahan profil yang belum disimpan. Tutup tanpa menyimpan?")
+                            .as_ptr(),
+                        wide("Profil belum disimpan").as_ptr(),
                         MB_YESNO | MB_ICONWARNING,
                     )
                 };
@@ -6381,9 +7362,10 @@ mod windows_e2e_tests {
             state.macro_library = MacroLibrary::default();
             sync_macro_name_edit(state);
 
-            assert_eq!(hit_test(287, 39, state), HitTarget::TimerTab);
-            assert_eq!(hit_test(361, 39, state), HitTarget::MacroTab);
-            assert_eq!(hit_test(448, 39, state), HitTarget::SettingsTab);
+            assert_eq!(hit_test(230, 39, state), HitTarget::TimerTab);
+            assert_eq!(hit_test(292, 39, state), HitTarget::MacroTab);
+            assert_eq!(hit_test(364, 39, state), HitTarget::ProfilesTab);
+            assert_eq!(hit_test(451, 39, state), HitTarget::SettingsTab);
             assert_eq!(hit_test(100, 240, state), HitTarget::AddThirtyMinutes);
             assert_eq!(hit_test(210, 240, state), HitTarget::AddOneHour);
             assert_eq!(hit_test(330, 240, state), HitTarget::AddThreeHours);
@@ -6391,6 +7373,75 @@ mod windows_e2e_tests {
             assert_eq!(hit_test(145, 442, state), HitTarget::EnterOnly);
             assert_eq!(hit_test(350, 442, state), HitTarget::TextAndEnter);
             assert_eq!(hit_test(260, 575, state), HitTarget::MainAction);
+
+            state.profile_library = ProfileLibrary::default();
+            sync_profile_name_edit(state);
+            let e2e_profiles_path = PathBuf::from("qa/e2e-profiles.vtp");
+            let e2e_profile_macros_path = PathBuf::from("qa/e2e-profile-macros.vtm");
+            let e2e_settings_path = PathBuf::from("qa/e2e-settings.vts");
+            let e2e_backup_path = PathBuf::from("qa/e2e-backup.vtb");
+            for path in [
+                &e2e_profiles_path,
+                &e2e_profile_macros_path,
+                &e2e_settings_path,
+                &e2e_backup_path,
+            ] {
+                let _ = fs::remove_file(path);
+            }
+            state.profiles_path = e2e_profiles_path.clone();
+            state.macro_path = e2e_profile_macros_path.clone();
+            state.settings_path = e2e_settings_path.clone();
+            switch_tab(state, AppTab::Profiles);
+            assert_eq!(hit_test(100, 137, state), HitTarget::ProfileNew);
+            assert_eq!(hit_test(84, 568, state), HitTarget::ProfileDuplicate);
+            assert_eq!(hit_test(176, 568, state), HitTarget::ProfileDelete);
+            assert_eq!(hit_test(410, 262, state), HitTarget::ProfileUseTimer);
+            assert_eq!(hit_test(700, 262, state), HitTarget::ProfileTargetPick);
+            assert_eq!(hit_test(410, 364, state), HitTarget::ProfileMacro(0));
+            assert_eq!(hit_test(360, 570, state), HitTarget::BackupExport);
+            assert_eq!(hit_test(540, 570, state), HitTarget::BackupImport);
+            assert_eq!(hit_test(740, 570, state), HitTarget::ProfileSave);
+            let executable =
+                process_executable_name(GetCurrentProcessId()).expect("executable test ditemukan");
+            state.profile_library.selected_mut().unwrap().target = Some(MacroTarget {
+                executable,
+                window_title: "VibeTimer E2E Target".to_owned(),
+            });
+            handle_click(state, HitTarget::ProfileMacro(0));
+            assert!(state.profile_library.selected().unwrap().contains_macro(1));
+            assert!(state.macro_library.selected().unwrap().target.is_some());
+            handle_click(state, HitTarget::ProfileUseTimer);
+            assert_eq!(
+                state.target.as_ref().map(|target| target.title.as_str()),
+                Some("VibeTimer E2E Target")
+            );
+            SetWindowTextW(state.profile_name_edit, wide("AI Workspace").as_ptr());
+            handle_click(state, HitTarget::ProfileSave);
+            assert_eq!(
+                state.profile_library.selected().unwrap().name,
+                "AI Workspace"
+            );
+            export_backup_to_path(state, &e2e_backup_path);
+            assert_eq!(state.profile_status_kind, StatusKind::Sent);
+            state.profile_library.selected_mut().unwrap().name = "Rusak".to_owned();
+            import_backup_from_path(state, &e2e_backup_path);
+            assert_eq!(
+                state.profile_library.selected().unwrap().name,
+                "AI Workspace"
+            );
+            handle_click(state, HitTarget::ProfileDuplicate);
+            assert_eq!(state.profile_library.profiles.len(), 2);
+            handle_click(state, HitTarget::ProfileDelete);
+            assert_eq!(state.profile_library.profiles.len(), 1);
+            InvalidateRect(main_window, null(), FALSE);
+            UpdateWindow(main_window);
+            pump_messages_for(Duration::from_millis(120));
+            save_window_bmp(main_window, Path::new("qa/vibetimer-profiles.bmp"))
+                .expect("snapshot Profiles dibuat");
+
+            state.macro_library = MacroLibrary::default();
+            state.macro_targets.clear();
+            sync_macro_name_edit(state);
 
             switch_tab(state, AppTab::Settings);
             assert_eq!(hit_test(210, 200, state), HitTarget::SettingMinimizeTray);
@@ -7227,6 +8278,16 @@ mod windows_e2e_tests {
             let _ = fs::remove_file(&e2e_macro_path);
             let _ = fs::remove_file(e2e_macro_path.with_extension("vtm.tmp"));
             let _ = fs::remove_file(e2e_macro_path.with_extension("vtm.bak"));
+            for path in [
+                e2e_profiles_path,
+                e2e_profile_macros_path,
+                e2e_settings_path,
+                e2e_backup_path,
+            ] {
+                let _ = fs::remove_file(&path);
+                let _ = fs::remove_file(path.with_extension("tmp"));
+                let _ = fs::remove_file(path.with_extension("bak"));
+            }
             DestroyWindow(target_window);
             DestroyWindow(main_window);
         }
