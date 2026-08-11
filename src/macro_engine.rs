@@ -1,12 +1,17 @@
 //! Model dan penyimpanan macro yang tidak bergantung pada Win32.
 
-use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+
+use crate::settings::{read_with_backup_recovery, save_atomic};
+
+#[cfg(test)]
+use std::fs;
 
 const MAGIC: &[u8; 4] = b"VTM1";
 const VERSION: u16 = 2;
 const MAX_ITEMS: usize = 10_000;
+const MAX_MACROS: usize = 6;
 const MAX_NAME_BYTES: usize = 160;
 const MAX_TARGET_BYTES: usize = 520;
 
@@ -151,13 +156,16 @@ impl MacroLibrary {
         self.macros.iter_mut().find(|item| item.id == selected_id)
     }
 
-    pub fn add_macro(&mut self) -> u32 {
+    pub fn add_macro(&mut self) -> Option<u32> {
+        if self.macros.len() >= MAX_MACROS {
+            return None;
+        }
         let id = self.next_id.max(1);
         self.next_id = id.saturating_add(1);
         let name = format!("Macro {}", self.macros.len() + 1);
         self.macros.push(MacroDefinition::new(id, name));
         self.selected_id = id;
-        id
+        Some(id)
     }
 
     pub fn delete_selected(&mut self) -> bool {
@@ -178,6 +186,9 @@ impl MacroLibrary {
     }
 
     pub fn duplicate_selected(&mut self) -> Option<u32> {
+        if self.macros.len() >= MAX_MACROS {
+            return None;
+        }
         let mut duplicate = self.selected()?.clone();
         let id = self.next_id.max(1);
         self.next_id = id.saturating_add(1);
@@ -243,40 +254,36 @@ pub fn default_data_path() -> PathBuf {
 }
 
 pub fn load_library(path: &Path) -> io::Result<MacroLibrary> {
-    match fs::read(path) {
-        Ok(bytes) => decode_library(&bytes)
+    match read_with_backup_recovery(path)? {
+        Some(bytes) => decode_library(&bytes)
             .map_err(|message| io::Error::new(io::ErrorKind::InvalidData, message)),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(MacroLibrary::default()),
-        Err(error) => Err(error),
+        None => Ok(MacroLibrary::default()),
     }
 }
 
 pub fn save_library(path: &Path, library: &MacroLibrary) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let temporary = path.with_extension("vtm.tmp");
-    fs::write(&temporary, encode_library(library)?)?;
-    if path.exists() {
-        let backup = path.with_extension("vtm.bak");
-        let _ = fs::remove_file(&backup);
-        fs::rename(path, &backup)?;
-        if let Err(error) = fs::rename(&temporary, path) {
-            let _ = fs::rename(&backup, path);
-            return Err(error);
-        }
-        let _ = fs::remove_file(backup);
-    } else {
-        fs::rename(temporary, path)?;
-    }
-    Ok(())
+    save_atomic(path, &encode_library(library)?, "vtm.tmp")
 }
 
 pub fn encode_library(library: &MacroLibrary) -> io::Result<Vec<u8>> {
-    if library.macros.len() > MAX_ITEMS {
+    if library.macros.len() > MAX_MACROS {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "Terlalu banyak macro.",
+        ));
+    }
+    let mut ids: Vec<u32> = library.macros.iter().map(|item| item.id).collect();
+    ids.sort_unstable();
+    let original_count = ids.len();
+    ids.dedup();
+    if ids.first() == Some(&0)
+        || ids.last() == Some(&u32::MAX)
+        || ids.len() != original_count
+        || !ids.contains(&library.selected_id)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "ID macro tidak unik atau berada di luar batas aman.",
         ));
     }
     let mut out = Vec::new();
@@ -286,6 +293,12 @@ pub fn encode_library(library: &MacroLibrary) -> io::Result<Vec<u8>> {
     push_u32(&mut out, library.next_id);
     push_u32(&mut out, library.macros.len() as u32);
     for item in &library.macros {
+        if item.id == 0 || item.id == u32::MAX || item.name.trim().is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "ID atau nama macro tidak valid.",
+            ));
+        }
         push_u32(&mut out, item.id);
         let name = item.name.as_bytes();
         if name.len() > MAX_NAME_BYTES {
@@ -298,10 +311,22 @@ pub fn encode_library(library: &MacroLibrary) -> io::Result<Vec<u8>> {
         out.extend_from_slice(name);
         out.push(mode_to_byte(item.mode));
         out.push(trigger_to_byte(item.trigger));
+        if item.standard_delay_ms.is_some_and(|value| value > 60_000) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Standard delay macro melewati batas 60000 ms.",
+            ));
+        }
         push_u32(&mut out, item.standard_delay_ms.unwrap_or(u32::MAX));
         out.push(u8::from(item.show_key_releases));
         match &item.target {
             Some(target) => {
+                if target.executable.trim().is_empty() || target.window_title.trim().is_empty() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "Target macro tidak lengkap.",
+                    ));
+                }
                 out.push(1);
                 push_string(&mut out, &target.executable, MAX_TARGET_BYTES)?;
                 push_string(&mut out, &target.window_title, MAX_TARGET_BYTES)?;
@@ -327,7 +352,7 @@ pub fn decode_library(bytes: &[u8]) -> Result<MacroLibrary, &'static str> {
     let selected_id = reader.u32()?;
     let next_id = reader.u32()?;
     let count = reader.u32()? as usize;
-    if count > MAX_ITEMS {
+    if count > MAX_MACROS {
         return Err("Jumlah macro tidak valid.");
     }
     let mut macros = Vec::with_capacity(count);
@@ -340,6 +365,9 @@ pub fn decode_library(bytes: &[u8]) -> Result<MacroLibrary, &'static str> {
         let name = std::str::from_utf8(reader.take(name_len)?)
             .map_err(|_| "Nama macro bukan UTF-8 yang valid.")?
             .to_owned();
+        if name.trim().is_empty() {
+            return Err("Nama macro tidak boleh kosong.");
+        }
         let mode = byte_to_mode(reader.u8()?)?;
         let trigger = byte_to_trigger(reader.u8()?)?;
         let standard = reader.u32()?;
@@ -360,6 +388,14 @@ pub fn decode_library(bytes: &[u8]) -> Result<MacroLibrary, &'static str> {
         } else {
             None
         };
+        if target.as_ref().is_some_and(|target| {
+            target.executable.trim().is_empty() || target.window_title.trim().is_empty()
+        }) {
+            return Err("Target macro tidak lengkap.");
+        }
+        if standard != u32::MAX && standard > 60_000 {
+            return Err("Standard delay macro melewati batas 60000 ms.");
+        }
         macros.push(MacroDefinition {
             id,
             name,
@@ -378,6 +414,16 @@ pub fn decode_library(bytes: &[u8]) -> Result<MacroLibrary, &'static str> {
     }
     if macros.is_empty() {
         return Ok(MacroLibrary::default());
+    }
+    let mut ids: Vec<u32> = macros.iter().map(|item| item.id).collect();
+    ids.sort_unstable();
+    if ids.first() == Some(&0) || ids.last() == Some(&u32::MAX) {
+        return Err("ID macro berada di luar batas aman.");
+    }
+    let original_count = ids.len();
+    ids.dedup();
+    if ids.len() != original_count {
+        return Err("ID macro duplikat.");
     }
     let selected_id = if macros.iter().any(|item| item.id == selected_id) {
         selected_id
@@ -409,6 +455,12 @@ fn encode_events(out: &mut Vec<u8>, events: &[MacroEvent]) -> io::Result<()> {
     for event in events {
         match *event {
             MacroEvent::Delay(value) => {
+                if value > 60_000 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "Delay macro melewati batas 60000 ms.",
+                    ));
+                }
                 out.push(0);
                 push_u32(out, value);
             }
@@ -459,7 +511,7 @@ fn decode_events(reader: &mut Reader<'_>, version: u16) -> Result<Vec<MacroEvent
         let kind = reader.u8()?;
         let value = reader.u32()?;
         let event = match kind {
-            0 => MacroEvent::Delay(value),
+            0 if value <= 60_000 => MacroEvent::Delay(value),
             1 if value <= u16::MAX as u32 => MacroEvent::KeyDown(value as u16),
             2 if value <= u16::MAX as u32 => MacroEvent::KeyUp(value as u16),
             3 if value <= u8::MAX as u32 => MacroEvent::MouseDown(byte_to_mouse(value as u8)?),
@@ -719,6 +771,18 @@ mod tests {
         assert_eq!(library.macros.len(), 2);
         assert!(library.delete_selected());
         assert_eq!(library.macros.len(), 1);
+    }
+
+    #[test]
+    fn macro_library_caps_visible_items_and_rejects_unsafe_delay() {
+        let mut library = MacroLibrary::default();
+        while library.macros.len() < MAX_MACROS {
+            assert!(library.add_macro().is_some());
+        }
+        assert!(library.add_macro().is_none());
+        assert!(library.duplicate_selected().is_none());
+        library.selected_mut().unwrap().on_press = vec![MacroEvent::Delay(60_001)];
+        assert!(encode_library(&library).is_err());
     }
 
     #[test]

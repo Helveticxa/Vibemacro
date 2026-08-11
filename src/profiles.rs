@@ -1,15 +1,17 @@
 //! App Profiles: satu target aplikasi dengan kumpulan macro yang terkait.
 
-use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::macro_engine::MacroTarget;
-use crate::settings::{data_directory, save_atomic};
+use crate::settings::{data_directory, read_with_backup_recovery, save_atomic};
+
+#[cfg(test)]
+use std::fs;
 
 const MAGIC: &[u8; 4] = b"VTP1";
 const VERSION: u16 = 1;
-const MAX_PROFILES: usize = 1_000;
+const MAX_PROFILES: usize = 6;
 const MAX_NAME_BYTES: usize = 160;
 const MAX_TARGET_BYTES: usize = 520;
 const MAX_LINKS: usize = 10_000;
@@ -80,7 +82,10 @@ impl ProfileLibrary {
             .find(|profile| profile.id == selected)
     }
 
-    pub fn add_profile(&mut self) -> u32 {
+    pub fn add_profile(&mut self) -> Option<u32> {
+        if self.profiles.len() >= MAX_PROFILES {
+            return None;
+        }
         let id = self.next_id.max(1);
         self.next_id = id.saturating_add(1);
         self.profiles.push(AppProfile::new(
@@ -88,7 +93,7 @@ impl ProfileLibrary {
             format!("Profil {}", self.profiles.len() + 1),
         ));
         self.selected_id = id;
-        id
+        Some(id)
     }
 
     pub fn duplicate_selected(&mut self) -> Option<u32> {
@@ -137,11 +142,10 @@ pub fn default_profiles_path() -> PathBuf {
 }
 
 pub fn load_profiles(path: &Path) -> io::Result<ProfileLibrary> {
-    match fs::read(path) {
-        Ok(bytes) => decode_profiles(&bytes)
+    match read_with_backup_recovery(path)? {
+        Some(bytes) => decode_profiles(&bytes)
             .map_err(|message| io::Error::new(io::ErrorKind::InvalidData, message)),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(ProfileLibrary::default()),
-        Err(error) => Err(error),
+        None => Ok(ProfileLibrary::default()),
     }
 }
 
@@ -156,6 +160,20 @@ pub fn encode_profiles(library: &ProfileLibrary) -> io::Result<Vec<u8>> {
             "Terlalu banyak profil.",
         ));
     }
+    let mut ids: Vec<u32> = library.profiles.iter().map(|profile| profile.id).collect();
+    ids.sort_unstable();
+    let original_count = ids.len();
+    ids.dedup();
+    if ids.first() == Some(&0)
+        || ids.last() == Some(&u32::MAX)
+        || ids.len() != original_count
+        || !ids.contains(&library.selected_id)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "ID profil tidak unik atau berada di luar batas aman.",
+        ));
+    }
     let mut out = Vec::new();
     out.extend_from_slice(MAGIC);
     push_u16(&mut out, VERSION);
@@ -163,10 +181,22 @@ pub fn encode_profiles(library: &ProfileLibrary) -> io::Result<Vec<u8>> {
     push_u32(&mut out, library.next_id);
     push_u32(&mut out, library.profiles.len() as u32);
     for profile in &library.profiles {
+        if profile.id == 0 || profile.id == u32::MAX || profile.name.trim().is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "ID atau nama profil tidak valid.",
+            ));
+        }
         push_u32(&mut out, profile.id);
         push_string(&mut out, &profile.name, MAX_NAME_BYTES)?;
         match &profile.target {
             Some(target) => {
+                if target.executable.trim().is_empty() || target.window_title.trim().is_empty() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "Target profil tidak lengkap.",
+                    ));
+                }
                 out.push(1);
                 push_string(&mut out, &target.executable, MAX_TARGET_BYTES)?;
                 push_string(&mut out, &target.window_title, MAX_TARGET_BYTES)?;
@@ -205,6 +235,9 @@ pub fn decode_profiles(bytes: &[u8]) -> Result<ProfileLibrary, &'static str> {
     for _ in 0..count {
         let id = reader.u32()?;
         let name = reader.string(MAX_NAME_BYTES)?;
+        if name.trim().is_empty() {
+            return Err("Nama profil tidak boleh kosong.");
+        }
         let target = match reader.u8()? {
             0 => None,
             1 => Some(MacroTarget {
@@ -213,6 +246,11 @@ pub fn decode_profiles(bytes: &[u8]) -> Result<ProfileLibrary, &'static str> {
             }),
             _ => return Err("Nilai target profil tidak valid."),
         };
+        if target.as_ref().is_some_and(|target| {
+            target.executable.trim().is_empty() || target.window_title.trim().is_empty()
+        }) {
+            return Err("Target profil tidak lengkap.");
+        }
         let link_count = reader.u32()? as usize;
         if link_count > MAX_LINKS {
             return Err("Jumlah tautan macro tidak valid.");
@@ -235,6 +273,16 @@ pub fn decode_profiles(bytes: &[u8]) -> Result<ProfileLibrary, &'static str> {
     }
     if profiles.is_empty() {
         return Ok(ProfileLibrary::default());
+    }
+    let mut ids: Vec<u32> = profiles.iter().map(|profile| profile.id).collect();
+    ids.sort_unstable();
+    if ids.first() == Some(&0) || ids.last() == Some(&u32::MAX) {
+        return Err("ID profil berada di luar batas aman.");
+    }
+    let original_count = ids.len();
+    ids.dedup();
+    if ids.len() != original_count {
+        return Err("ID profil duplikat.");
     }
     let selected_id = if profiles.iter().any(|profile| profile.id == selected_id) {
         selected_id
@@ -362,7 +410,12 @@ mod tests {
         assert!(library.selected().unwrap().macro_ids.is_empty());
         assert!(library.delete_selected());
         assert!(!library.delete_selected());
-        assert_eq!(library.add_profile(), 3);
+        assert_eq!(library.add_profile(), Some(3));
+        while library.profiles.len() < MAX_PROFILES {
+            assert!(library.add_profile().is_some());
+        }
+        assert!(library.add_profile().is_none());
+        assert!(library.duplicate_selected().is_none());
     }
 
     #[test]

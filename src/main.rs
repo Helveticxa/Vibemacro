@@ -192,6 +192,7 @@ const OFN_PATHMUSTEXIST: Dword = 0x0000_0800;
 const OFN_FILEMUSTEXIST: Dword = 0x0000_1000;
 const OFN_EXPLORER: Dword = 0x0008_0000;
 const CF_UNICODETEXT: Uint = 13;
+const ERROR_ALREADY_EXISTS: Dword = 183;
 #[cfg(test)]
 const ES_MULTILINE: Dword = 0x0004;
 #[cfg(test)]
@@ -510,6 +511,16 @@ impl Default for NotifyIconDataW {
     }
 }
 
+struct OwnedKernelHandle(isize);
+
+impl Drop for OwnedKernelHandle {
+    fn drop(&mut self) {
+        if self.0 != 0 {
+            unsafe { CloseHandle(self.0) };
+        }
+    }
+}
+
 #[link(name = "user32")]
 unsafe extern "system" {
     fn RegisterClassW(class: *const WndClassW) -> u16;
@@ -601,6 +612,7 @@ unsafe extern "system" {
     fn CloseClipboard() -> Bool;
     fn IsClipboardFormatAvailable(format: Uint) -> Bool;
     fn GetClipboardData(format: Uint) -> isize;
+    fn FindWindowW(class_name: *const u16, window_name: *const u16) -> Hwnd;
     fn CreatePopupMenu() -> Hmenu;
     fn AppendMenuW(menu: Hmenu, flags: Uint, id: usize, text: *const u16) -> Bool;
     fn TrackPopupMenu(
@@ -681,6 +693,9 @@ unsafe extern "system" {
     fn GlobalLock(memory: isize) -> *mut c_void;
     fn GlobalUnlock(memory: isize) -> Bool;
     fn GetLocalTime(time: *mut SystemTimeW);
+    fn CreateMutexW(attributes: *mut c_void, initial_owner: Bool, name: *const u16) -> isize;
+    fn GetLastError() -> Dword;
+    fn GlobalSize(memory: isize) -> usize;
 }
 
 #[link(name = "gdi32")]
@@ -4707,6 +4722,20 @@ fn synchronize_all_profile_targets(profiles: &ProfileLibrary, macros: &mut Macro
     }
 }
 
+fn save_bundle_files(
+    macro_path: &Path,
+    profiles_path: &Path,
+    settings_path: &Path,
+    timers_path: &Path,
+    bundle: &BackupBundle,
+) -> Result<(), String> {
+    save_library(macro_path, &bundle.macros)
+        .and_then(|_| save_profiles(profiles_path, &bundle.profiles))
+        .and_then(|_| save_settings(settings_path, &bundle.settings))
+        .and_then(|_| save_timers(timers_path, &bundle.timers))
+        .map_err(|error| error.to_string())
+}
+
 unsafe fn export_backup_to_path(state: &mut AppState, path: &Path) {
     let bundle = BackupBundle::with_timers(
         state.macro_library.clone(),
@@ -4747,13 +4776,33 @@ unsafe fn import_backup_from_path(state: &mut AppState, path: &Path) {
     synchronize_all_profile_targets(&bundle.profiles, &mut bundle.macros);
     // Import tidak pernah meneruskan timer aktif dari komputer/sesi lain.
     bundle.timers.cancel_all();
-    let save_result = save_library(&state.macro_path, &bundle.macros)
-        .and_then(|_| save_profiles(&state.profiles_path, &bundle.profiles))
-        .and_then(|_| save_settings(&state.settings_path, &bundle.settings))
-        .and_then(|_| save_timers(&state.timers_path, &bundle.timers));
-    if let Err(error) = save_result {
+    let previous = BackupBundle::with_timers(
+        state.macro_library.clone(),
+        state.profile_library.clone(),
+        state.settings.clone(),
+        state.timer_library.clone(),
+    );
+    if let Err(error) = save_bundle_files(
+        &state.macro_path,
+        &state.profiles_path,
+        &state.settings_path,
+        &state.timers_path,
+        &bundle,
+    ) {
+        let rollback = save_bundle_files(
+            &state.macro_path,
+            &state.profiles_path,
+            &state.settings_path,
+            &state.timers_path,
+            &previous,
+        );
         state.profile_status_kind = StatusKind::Error;
-        state.profile_status = format!("Import valid tetapi gagal disimpan: {error}");
+        state.profile_status = match rollback {
+            Ok(()) => format!("Import gagal dan state lama dipulihkan: {error}"),
+            Err(rollback_error) => format!(
+                "Import gagal ({error}); pemulihan state juga gagal ({rollback_error}). Gunakan backup manual."
+            ),
+        };
         unsafe { InvalidateRect(state.window, null(), FALSE) };
         return;
     }
@@ -4776,6 +4825,7 @@ unsafe fn import_backup_from_path(state: &mut AppState, path: &Path) {
         sync_macro_name_edit(state);
         sync_profile_name_edit(state);
         sync_delay_edit(state);
+        refresh_macro_hooks(state);
         KillTimer(state.window, TIMER_COUNTDOWN);
         sync_selected_timer_to_controls(state);
     }
@@ -6027,9 +6077,18 @@ unsafe fn clipboard_text(owner: Hwnd) -> Result<String, String> {
             if pointer.is_null() {
                 return Err("Teks clipboard tidak dapat dikunci.".to_owned());
             }
+            let maximum_units = (GlobalSize(memory) / size_of::<u16>()).min(16_384);
+            if maximum_units == 0 {
+                GlobalUnlock(memory);
+                return Err("Ukuran teks clipboard tidak valid.".to_owned());
+            }
             let mut length = 0usize;
-            while length < 16_384 && *pointer.add(length) != 0 {
+            while length < maximum_units && *pointer.add(length) != 0 {
                 length += 1;
+            }
+            if length == maximum_units {
+                GlobalUnlock(memory);
+                return Err("Teks clipboard tidak memiliki terminator yang valid.".to_owned());
             }
             let text = String::from_utf16_lossy(std::slice::from_raw_parts(pointer, length));
             GlobalUnlock(memory);
@@ -6103,6 +6162,8 @@ fn apply_selected_profile_target_to_linked_macros(state: &mut AppState) {
 }
 
 unsafe fn persist_profiles_and_macros(state: &mut AppState, message: &str) -> bool {
+    let previous_profiles = load_profiles(&state.profiles_path);
+    let previous_macros = load_library(&state.macro_path);
     let profiles_result = save_profiles(&state.profiles_path, &state.profile_library);
     let macros_result = save_library(&state.macro_path, &state.macro_library);
     match profiles_result.and(macros_result) {
@@ -6115,8 +6176,17 @@ unsafe fn persist_profiles_and_macros(state: &mut AppState, message: &str) -> bo
             true
         }
         Err(error) => {
+            let rollback = previous_profiles.and_then(|profiles| {
+                save_profiles(&state.profiles_path, &profiles).and_then(|_| {
+                    previous_macros.and_then(|macros| save_library(&state.macro_path, &macros))
+                })
+            });
             state.profile_status_kind = StatusKind::Error;
-            state.profile_status = format!("Profil gagal disimpan: {error}");
+            state.profile_status = if rollback.is_ok() {
+                format!("Profil gagal disimpan; file lama dipulihkan: {error}")
+            } else {
+                format!("Profil gagal disimpan dan rollback tidak lengkap: {error}")
+            };
             unsafe { InvalidateRect(state.window, null(), FALSE) };
             false
         }
@@ -6221,7 +6291,10 @@ unsafe fn save_current_macro(state: &mut AppState) {
             state.macro_status = format!("Gagal menyimpan macro: {error}");
         }
     }
-    unsafe { InvalidateRect(state.window, null(), FALSE) };
+    unsafe {
+        refresh_macro_hooks(state);
+        InvalidateRect(state.window, null(), FALSE);
+    };
 }
 
 unsafe fn start_macro_recording(state: &mut AppState) {
@@ -6244,6 +6317,11 @@ unsafe fn start_macro_recording(state: &mut AppState) {
     };
     MACRO_STOP.store(true, Ordering::Release);
     state.recording = true;
+    if !unsafe { refresh_macro_hooks(state) } {
+        state.recording = false;
+        unsafe { refresh_macro_hooks(state) };
+        return;
+    }
     state.record_last_event = Some(Instant::now());
     state.macro_status_kind = StatusKind::Running;
     state.macro_status = match destination {
@@ -6295,6 +6373,7 @@ unsafe fn stop_macro_recording(state: &mut AppState) {
         return;
     }
     state.recording = false;
+    unsafe { refresh_macro_hooks(state) };
     state.record_last_event = None;
     state.macro_dirty = true;
     let count = state
@@ -6737,12 +6816,26 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: Wparam, lparam: Lpa
     if data.flags & LLMHF_INJECTED != 0 {
         return unsafe { CallNextHookEx(0, code, wparam, lparam) };
     }
+    let message = wparam as Uint;
+    if !matches!(
+        message,
+        WM_LBUTTONDOWN
+            | WM_LBUTTONUP
+            | WM_RBUTTONDOWN
+            | WM_RBUTTONUP
+            | WM_MBUTTONDOWN
+            | WM_MBUTTONUP
+            | WM_XBUTTONDOWN
+            | WM_XBUTTONUP
+            | WM_MOUSEWHEEL
+    ) {
+        return unsafe { CallNextHookEx(0, code, wparam, lparam) };
+    }
     let state_pointer = APP_STATE_POINTER.load(Ordering::Acquire);
     if state_pointer.is_null() {
         return unsafe { CallNextHookEx(0, code, wparam, lparam) };
     }
     let state = unsafe { &mut *state_pointer };
-    let message = wparam as Uint;
     let button_event = match message {
         WM_LBUTTONDOWN => {
             Some(unsafe { recorded_mouse_event(state, MouseButton::Left, true, data.point) })
@@ -6795,15 +6888,59 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: Wparam, lparam: Lpa
     unsafe { CallNextHookEx(0, code, wparam, lparam) }
 }
 
-unsafe fn initialize_macro_hooks(state: &mut AppState, instance: Hinstance) {
-    state.keyboard_hook =
-        unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook_proc), instance, 0) };
-    state.mouse_hook =
-        unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook_proc), instance, 0) };
-    if state.keyboard_hook == 0 || state.mouse_hook == 0 {
+fn macro_has_actions(item: &MacroDefinition) -> bool {
+    item.on_press
+        .iter()
+        .chain(&item.while_holding)
+        .chain(&item.on_release)
+        .any(|event| !matches!(event, MacroEvent::Delay(_)))
+}
+
+unsafe fn reconcile_macro_hooks(state: &mut AppState, instance: Hinstance) -> bool {
+    let wants_keyboard = state.recording
+        || state.macro_library.macros.iter().any(|item| {
+            macro_has_actions(item) && matches!(item.trigger, MacroTrigger::F8 | MacroTrigger::F9)
+        });
+    let wants_mouse = state.recording
+        || state.macro_library.macros.iter().any(|item| {
+            macro_has_actions(item)
+                && matches!(
+                    item.trigger,
+                    MacroTrigger::MouseMiddle | MacroTrigger::MouseX1 | MacroTrigger::MouseX2
+                )
+        });
+    unsafe {
+        if wants_keyboard && state.keyboard_hook == 0 {
+            state.keyboard_hook =
+                SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook_proc), instance, 0);
+        } else if !wants_keyboard && state.keyboard_hook != 0 {
+            UnhookWindowsHookEx(state.keyboard_hook);
+            state.keyboard_hook = 0;
+        }
+        if wants_mouse && state.mouse_hook == 0 {
+            state.mouse_hook = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook_proc), instance, 0);
+        } else if !wants_mouse && state.mouse_hook != 0 {
+            UnhookWindowsHookEx(state.mouse_hook);
+            state.mouse_hook = 0;
+        }
+    }
+    let ready =
+        (!wants_keyboard || state.keyboard_hook != 0) && (!wants_mouse || state.mouse_hook != 0);
+    if !ready {
         state.macro_status_kind = StatusKind::Error;
         state.macro_status =
             "Hook global gagal aktif. Jalankan aplikasi pada desktop Windows biasa.".to_owned();
+    }
+    ready
+}
+
+unsafe fn refresh_macro_hooks(state: &mut AppState) -> bool {
+    unsafe { reconcile_macro_hooks(state, GetModuleHandleW(null())) }
+}
+
+unsafe fn initialize_macro_hooks(state: &mut AppState, instance: Hinstance) {
+    unsafe {
+        reconcile_macro_hooks(state, instance);
     }
 }
 
@@ -7030,7 +7167,13 @@ unsafe fn handle_click(state: &mut AppState, target: HitTarget) {
             if state.recording {
                 return;
             }
-            state.macro_library.add_macro();
+            if state.macro_library.add_macro().is_none() {
+                state.macro_status_kind = StatusKind::Warning;
+                state.macro_status =
+                    "Maksimal 6 macro agar seluruh assignment tetap terlihat.".to_owned();
+                unsafe { InvalidateRect(state.window, null(), FALSE) };
+                return;
+            }
             state.macro_lane = MacroLane::OnPress;
             state.macro_selected_event = None;
             state.macro_dirty = true;
@@ -7083,7 +7226,10 @@ unsafe fn handle_click(state: &mut AppState, target: HitTarget) {
                     "Pemicu {} dipasang. Simpan untuk permanen.",
                     trigger.label()
                 );
-                unsafe { InvalidateRect(state.window, null(), FALSE) };
+                unsafe {
+                    refresh_macro_hooks(state);
+                    InvalidateRect(state.window, null(), FALSE);
+                };
             }
         }
         HitTarget::MacroLane(lane) => {
@@ -7091,6 +7237,7 @@ unsafe fn handle_click(state: &mut AppState, target: HitTarget) {
                 state.macro_lane = lane;
                 state.macro_selected_event = None;
                 unsafe {
+                    refresh_macro_hooks(state);
                     sync_delay_edit(state);
                     InvalidateRect(state.window, null(), FALSE);
                 };
@@ -7213,6 +7360,7 @@ unsafe fn handle_click(state: &mut AppState, target: HitTarget) {
                 state.macro_status =
                     "Langkah dihapus. Simpan untuk membuatnya permanen.".to_owned();
                 unsafe {
+                    refresh_macro_hooks(state);
                     sync_delay_edit(state);
                     InvalidateRect(state.window, null(), FALSE);
                 }
@@ -7274,6 +7422,7 @@ unsafe fn handle_click(state: &mut AppState, target: HitTarget) {
                     state.macro_status_kind = StatusKind::Warning;
                     state.macro_status = format!("{name} dihapus. Simpan untuk permanen.");
                     unsafe {
+                        refresh_macro_hooks(state);
                         sync_macro_name_edit(state);
                         sync_delay_edit(state);
                         InvalidateRect(state.window, null(), FALSE);
@@ -7303,6 +7452,7 @@ unsafe fn handle_click(state: &mut AppState, target: HitTarget) {
                 state.macro_status =
                     "Lane dibersihkan. Tekan Simpan untuk mempertahankan perubahan.".to_owned();
                 unsafe {
+                    refresh_macro_hooks(state);
                     sync_delay_edit(state);
                     InvalidateRect(state.window, null(), FALSE);
                 };
@@ -7374,7 +7524,13 @@ unsafe fn handle_click(state: &mut AppState, target: HitTarget) {
         }
         HitTarget::SettingTestEmergency => unsafe { emergency_stop(state, "tombol Settings") },
         HitTarget::ProfileNew => {
-            state.profile_library.add_profile();
+            if state.profile_library.add_profile().is_none() {
+                state.profile_status_kind = StatusKind::Warning;
+                state.profile_status =
+                    "Maksimal 6 profil agar seluruh target tetap terlihat.".to_owned();
+                unsafe { InvalidateRect(state.window, null(), FALSE) };
+                return;
+            }
             state.profile_dirty = true;
             state.profile_status_kind = StatusKind::Ready;
             state.profile_status = "Profil baru dibuat. Beri nama dan pilih target.".to_owned();
@@ -7939,6 +8095,23 @@ fn run() -> Result<(), String> {
         // di skala layar Windows yang umum. Gagal di Windows lama tidak fatal.
         SetProcessDpiAwarenessContext(-5isize);
 
+        let mutex_name = wide("Local\\VibeTimer.SingleInstance.v1");
+        let mutex = CreateMutexW(null_mut(), TRUE, mutex_name.as_ptr());
+        if mutex == 0 {
+            return Err("Tidak dapat membuat pengunci single-instance.".to_owned());
+        }
+        let already_running = GetLastError() == ERROR_ALREADY_EXISTS;
+        let _mutex_guard = OwnedKernelHandle(mutex);
+        if already_running {
+            let class_name = wide("VibeTimerWindowClass");
+            let existing = FindWindowW(class_name.as_ptr(), null());
+            if existing != 0 {
+                ShowWindow(existing, SW_RESTORE);
+                SetForegroundWindow(existing);
+            }
+            return Ok(());
+        }
+
         let instance = GetModuleHandleW(null());
         if instance == 0 {
             return Err("Tidak dapat memperoleh handle aplikasi.".to_owned());
@@ -8226,10 +8399,17 @@ mod windows_e2e_tests {
             let state_pointer = GetWindowLongPtrW(main_window, GWLP_USERDATA) as *mut AppState;
             assert!(!state_pointer.is_null());
             let state = &mut *state_pointer;
-            assert_ne!(state.keyboard_hook, 0, "keyboard hook harus aktif");
-            assert_ne!(state.mouse_hook, 0, "mouse hook harus aktif");
             state.macro_library = MacroLibrary::default();
             sync_macro_name_edit(state);
+            assert!(refresh_macro_hooks(state));
+            assert_eq!(
+                state.keyboard_hook, 0,
+                "macro kosong tidak boleh memasang keyboard hook"
+            );
+            assert_eq!(
+                state.mouse_hook, 0,
+                "macro kosong tidak boleh memasang mouse hook"
+            );
 
             assert_eq!(hit_test(230, 39, state), HitTarget::TimerTab);
             assert_eq!(hit_test(292, 39, state), HitTarget::MacroTab);
@@ -8631,6 +8811,11 @@ mod windows_e2e_tests {
                 .expect("snapshot macro kosong dibuat");
             start_macro_recording(state);
             assert!(state.recording);
+            assert_ne!(
+                state.keyboard_hook, 0,
+                "recording harus memasang keyboard hook"
+            );
+            assert_ne!(state.mouse_hook, 0, "recording harus memasang mouse hook");
             let recorded_key = KbdLlHookStruct {
                 vk_code: 0x41,
                 scan_code: 0,
@@ -8688,6 +8873,14 @@ mod windows_e2e_tests {
             );
             keyboard_hook_proc(HC_ACTION, WM_KEYUP as Wparam, &escape as *const _ as Lparam);
             assert!(!state.recording, "Esc harus menghentikan recording");
+            assert_ne!(
+                state.keyboard_hook, 0,
+                "macro F8 berisi aksi harus mempertahankan keyboard hook"
+            );
+            assert_eq!(
+                state.mouse_hook, 0,
+                "macro F8 tidak membutuhkan mouse hook setelah recording"
+            );
             let recorded = &state
                 .macro_library
                 .selected()
@@ -8858,6 +9051,9 @@ mod windows_e2e_tests {
                 .selected_mut()
                 .expect("macro mouse tersedia")
                 .trigger = MacroTrigger::MouseX1;
+            assert!(refresh_macro_hooks(state));
+            assert_eq!(state.keyboard_hook, 0);
+            assert_ne!(state.mouse_hook, 0);
             let before_mouse_macro = get_window_text(target_edit).len();
             let mouse = MsLlHookStruct {
                 point: Point::default(),
@@ -8960,6 +9156,9 @@ mod windows_e2e_tests {
                 MacroEvent::KeyDown(VK_RETURN),
                 MacroEvent::KeyUp(VK_RETURN),
             ];
+            assert!(refresh_macro_hooks(state));
+            assert_ne!(state.keyboard_hook, 0);
+            assert_eq!(state.mouse_hook, 0);
             let f9 = KbdLlHookStruct {
                 vk_code: VK_F9 as Dword,
                 scan_code: 0,

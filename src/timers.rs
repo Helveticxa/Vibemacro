@@ -1,8 +1,11 @@
 use crate::macro_engine::MacroTarget;
-use std::fs;
+use crate::settings::{read_with_backup_recovery, save_atomic};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+#[cfg(test)]
+use std::fs;
 
 const MAGIC: &[u8; 4] = b"VTT1";
 const VERSION: u16 = 1;
@@ -280,6 +283,19 @@ pub fn encode_timers(library: &TimerLibrary) -> io::Result<Vec<u8>> {
     if library.timers.is_empty() || library.timers.len() > MAX_TIMERS {
         return Err(invalid_data("Jumlah timer tidak valid."));
     }
+    let mut ids: Vec<u32> = library.timers.iter().map(|timer| timer.id).collect();
+    ids.sort_unstable();
+    let original_count = ids.len();
+    ids.dedup();
+    if ids.first() == Some(&0)
+        || ids.last() == Some(&u32::MAX)
+        || ids.len() != original_count
+        || !ids.contains(&library.selected_id)
+    {
+        return Err(invalid_data(
+            "ID timer tidak unik atau berada di luar batas aman.",
+        ));
+    }
     let mut output = Vec::new();
     output.extend_from_slice(MAGIC);
     put_u16(&mut output, VERSION);
@@ -287,6 +303,9 @@ pub fn encode_timers(library: &TimerLibrary) -> io::Result<Vec<u8>> {
     put_u32(&mut output, library.next_id);
     put_u16(&mut output, library.timers.len() as u16);
     for timer in &library.timers {
+        if timer.id == 0 || timer.id == u32::MAX || timer.name.trim().is_empty() {
+            return Err(invalid_data("ID atau nama timer tidak valid."));
+        }
         put_u32(&mut output, timer.id);
         put_string(&mut output, &timer.name)?;
         put_u64(&mut output, timer.duration_seconds);
@@ -300,6 +319,9 @@ pub fn encode_timers(library: &TimerLibrary) -> io::Result<Vec<u8>> {
         put_string(&mut output, &timer.prompt)?;
         output.push(u8::from(timer.target.is_some()));
         if let Some(target) = &timer.target {
+            if target.executable.trim().is_empty() || target.window_title.trim().is_empty() {
+                return Err(invalid_data("Target timer tidak lengkap."));
+            }
             put_string(&mut output, &target.executable)?;
             put_string(&mut output, &target.window_title)?;
         }
@@ -325,6 +347,9 @@ pub fn decode_timers(bytes: &[u8]) -> io::Result<TimerLibrary> {
     for _ in 0..count {
         let id = reader.u32()?;
         let name = reader.string()?;
+        if id == 0 || id == u32::MAX || name.trim().is_empty() {
+            return Err(invalid_data("ID atau nama timer tidak valid."));
+        }
         let duration_seconds = reader.u64()?;
         let remaining_seconds = reader.u64()?;
         let deadline_unix_ms = reader.u64()?;
@@ -346,6 +371,11 @@ pub fn decode_timers(bytes: &[u8]) -> io::Result<TimerLibrary> {
             }),
             _ => return Err(invalid_data("Flag target timer tidak valid.")),
         };
+        if target.as_ref().is_some_and(|target| {
+            target.executable.trim().is_empty() || target.window_title.trim().is_empty()
+        }) {
+            return Err(invalid_data("Target timer tidak lengkap."));
+        }
         timers.push(TimerDefinition {
             id,
             name,
@@ -366,6 +396,9 @@ pub fn decode_timers(bytes: &[u8]) -> io::Result<TimerLibrary> {
     }
     let mut ids: Vec<u32> = timers.iter().map(|timer| timer.id).collect();
     ids.sort_unstable();
+    if ids.first() == Some(&0) || ids.last() == Some(&u32::MAX) {
+        return Err(invalid_data("ID timer berada di luar batas aman."));
+    }
     ids.dedup();
     if ids.len() != timers.len() {
         return Err(invalid_data("ID timer duplikat."));
@@ -378,31 +411,14 @@ pub fn decode_timers(bytes: &[u8]) -> io::Result<TimerLibrary> {
 }
 
 pub fn load_timers(path: &Path) -> io::Result<TimerLibrary> {
-    if !path.exists() {
-        return Ok(TimerLibrary::default());
+    match read_with_backup_recovery(path)? {
+        Some(bytes) => decode_timers(&bytes),
+        None => Ok(TimerLibrary::default()),
     }
-    decode_timers(&fs::read(path)?)
 }
 
 pub fn save_timers(path: &Path, library: &TimerLibrary) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let temporary = path.with_extension("vtt.tmp");
-    let backup = path.with_extension("vtt.bak");
-    fs::write(&temporary, encode_timers(library)?)?;
-    if path.exists() {
-        let _ = fs::remove_file(&backup);
-        fs::rename(path, &backup)?;
-    }
-    if let Err(error) = fs::rename(&temporary, path) {
-        if backup.exists() {
-            let _ = fs::rename(&backup, path);
-        }
-        return Err(error);
-    }
-    let _ = fs::remove_file(&backup);
-    Ok(())
+    save_atomic(path, &encode_timers(library)?, "vtt.tmp")
 }
 
 fn phase_to_byte(phase: TimerPhase) -> u8 {
@@ -603,6 +619,12 @@ mod tests {
         library.selected_id = library.timers[0].id;
         library.timers[0].phase = TimerPhase::Running;
         assert!(!library.delete_selected());
+        library.timers[0].phase = TimerPhase::Idle;
+        while library.timers.len() < MAX_TIMERS {
+            assert!(library.add_timer());
+        }
+        assert!(!library.add_timer());
+        assert!(!library.duplicate_selected());
         let path =
             std::env::temp_dir().join(format!("vibe-timer-{}-timers.vtt", std::process::id()));
         let _ = fs::remove_file(&path);

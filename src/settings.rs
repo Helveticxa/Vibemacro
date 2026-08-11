@@ -1,7 +1,7 @@
 //! Pengaturan runtime VibeTimer yang dapat diuji tanpa Win32.
 
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 const MAGIC: &[u8; 4] = b"VTS1";
@@ -72,11 +72,10 @@ pub fn data_directory() -> PathBuf {
 }
 
 pub fn load_settings(path: &Path) -> io::Result<AppSettings> {
-    match fs::read(path) {
-        Ok(bytes) => decode_settings(&bytes)
+    match read_with_backup_recovery(path)? {
+        Some(bytes) => decode_settings(&bytes)
             .map_err(|message| io::Error::new(io::ErrorKind::InvalidData, message)),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(AppSettings::default()),
-        Err(error) => Err(error),
+        None => Ok(AppSettings::default()),
     }
 }
 
@@ -89,9 +88,12 @@ pub fn save_atomic(path: &Path, bytes: &[u8], temporary_extension: &str) -> io::
         fs::create_dir_all(parent)?;
     }
     let temporary = path.with_extension(temporary_extension);
-    fs::write(&temporary, bytes)?;
+    let mut file = fs::File::create(&temporary)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    drop(file);
+    let backup = path.with_extension("bak");
     if path.exists() {
-        let backup = path.with_extension("bak");
         let _ = fs::remove_file(&backup);
         fs::rename(path, &backup)?;
         if let Err(error) = fs::rename(&temporary, path) {
@@ -100,9 +102,29 @@ pub fn save_atomic(path: &Path, bytes: &[u8], temporary_extension: &str) -> io::
         }
         let _ = fs::remove_file(backup);
     } else {
+        let _ = fs::remove_file(&backup);
         fs::rename(temporary, path)?;
     }
     Ok(())
+}
+
+pub fn read_with_backup_recovery(path: &Path) -> io::Result<Option<Vec<u8>>> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let backup = path.with_extension("bak");
+            match fs::read(&backup) {
+                Ok(bytes) => {
+                    // Best effort: kembalikan primary agar proses save berikutnya normal.
+                    let _ = fs::rename(&backup, path);
+                    Ok(Some(bytes))
+                }
+                Err(backup_error) if backup_error.kind() == io::ErrorKind::NotFound => Ok(None),
+                Err(backup_error) => Err(backup_error),
+            }
+        }
+        Err(error) => Err(error),
+    }
 }
 
 pub fn encode_settings(settings: &AppSettings) -> Vec<u8> {
@@ -206,6 +228,10 @@ mod tests {
         let settings = AppSettings::default();
         save_settings(&path, &settings).expect("pengaturan disimpan");
         assert_eq!(load_settings(&path).expect("pengaturan dimuat"), settings);
+        let backup = path.with_extension("bak");
+        fs::rename(&path, &backup).expect("simulasi crash dibuat");
+        assert_eq!(load_settings(&path).expect("backup dipulihkan"), settings);
+        assert!(path.exists(), "primary dikembalikan dari backup");
         fs::remove_file(path).expect("file dibersihkan");
         fs::remove_dir(directory).expect("folder dibersihkan");
     }
