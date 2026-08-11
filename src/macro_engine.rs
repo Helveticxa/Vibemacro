@@ -159,6 +159,80 @@ impl MacroLibrary {
         self.selected_id = id;
         id
     }
+
+    pub fn delete_selected(&mut self) -> bool {
+        if self.macros.len() <= 1 {
+            return false;
+        }
+        let Some(index) = self
+            .macros
+            .iter()
+            .position(|item| item.id == self.selected_id)
+        else {
+            return false;
+        };
+        self.macros.remove(index);
+        let next_index = index.min(self.macros.len().saturating_sub(1));
+        self.selected_id = self.macros[next_index].id;
+        true
+    }
+
+    pub fn duplicate_selected(&mut self) -> Option<u32> {
+        let mut duplicate = self.selected()?.clone();
+        let id = self.next_id.max(1);
+        self.next_id = id.saturating_add(1);
+        duplicate.id = id;
+        duplicate.name = format!("{} salinan", duplicate.name);
+        self.macros.push(duplicate);
+        self.selected_id = id;
+        Some(id)
+    }
+}
+
+pub fn move_event(events: &mut [MacroEvent], index: usize, direction: i32) -> Option<usize> {
+    if events.is_empty() || index >= events.len() || direction == 0 {
+        return None;
+    }
+    let target = if direction < 0 {
+        index.checked_sub(1)?
+    } else {
+        index.checked_add(1).filter(|value| *value < events.len())?
+    };
+    events.swap(index, target);
+    Some(target)
+}
+
+pub fn duplicate_event(events: &mut Vec<MacroEvent>, index: usize) -> Option<usize> {
+    if events.len() >= MAX_ITEMS {
+        return None;
+    }
+    let event = events.get(index)?.clone();
+    let target = index + 1;
+    events.insert(target, event);
+    Some(target)
+}
+
+pub fn delete_event(events: &mut Vec<MacroEvent>, index: usize) -> Option<usize> {
+    if index >= events.len() {
+        return None;
+    }
+    events.remove(index);
+    (!events.is_empty()).then_some(index.min(events.len() - 1))
+}
+
+pub fn insert_delay(
+    events: &mut Vec<MacroEvent>,
+    after: Option<usize>,
+    value: u32,
+) -> Option<usize> {
+    if events.len() >= MAX_ITEMS {
+        return None;
+    }
+    let index = after
+        .map(|current| current.saturating_add(1).min(events.len()))
+        .unwrap_or(events.len());
+    events.insert(index, MacroEvent::Delay(value.min(60_000)));
+    Some(index)
 }
 
 pub fn default_data_path() -> PathBuf {
@@ -619,6 +693,32 @@ mod tests {
         assert_eq!(item.mode, MacroMode::NoRepeat);
         assert_eq!(item.trigger, MacroTrigger::F8);
         assert!(item.on_press.is_empty());
+    }
+
+    #[test]
+    fn timeline_editing_moves_duplicates_inserts_and_deletes() {
+        let mut events = vec![
+            MacroEvent::KeyDown(0x41),
+            MacroEvent::Delay(20),
+            MacroEvent::KeyUp(0x41),
+        ];
+        assert_eq!(move_event(&mut events, 1, -1), Some(0));
+        assert_eq!(events[0], MacroEvent::Delay(20));
+        assert_eq!(duplicate_event(&mut events, 0), Some(1));
+        assert_eq!(insert_delay(&mut events, Some(1), 75_000), Some(2));
+        assert_eq!(events[2], MacroEvent::Delay(60_000));
+        assert_eq!(delete_event(&mut events, 2), Some(2));
+    }
+
+    #[test]
+    fn macro_library_duplicates_and_keeps_one_safe_item() {
+        let mut library = MacroLibrary::default();
+        assert!(!library.delete_selected());
+        let duplicate = library.duplicate_selected().expect("macro diduplikat");
+        assert_eq!(library.selected_id, duplicate);
+        assert_eq!(library.macros.len(), 2);
+        assert!(library.delete_selected());
+        assert_eq!(library.macros.len(), 1);
     }
 
     #[test]

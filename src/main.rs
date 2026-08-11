@@ -14,7 +14,11 @@ use std::sync::atomic::{AtomicIsize, AtomicUsize};
 
 use vibe_timer_core::macro_engine::{
     MacroDefinition, MacroEvent, MacroLibrary, MacroMode, MacroTarget, MacroTrigger, MouseButton,
-    default_data_path, load_library, save_library,
+    default_data_path, delete_event, duplicate_event, insert_delay, load_library, move_event,
+    save_library,
+};
+use vibe_timer_core::settings::{
+    AppSettings, EmergencyHotkey, default_settings_path, load_settings, save_settings,
 };
 use vibe_timer_core::{DurationFields, format_duration};
 
@@ -62,7 +66,9 @@ const WM_SETCURSOR: Uint = 0x0020;
 const WM_NCCREATE: Uint = 0x0081;
 const WM_NCDESTROY: Uint = 0x0082;
 const WM_COMMAND: Uint = 0x0111;
+const WM_SIZE: Uint = 0x0005;
 const WM_TIMER: Uint = 0x0113;
+const WM_HOTKEY: Uint = 0x0312;
 const WM_CTLCOLOREDIT: Uint = 0x0133;
 const WM_CTLCOLORSTATIC: Uint = 0x0138;
 const WM_MOUSEMOVE: Uint = 0x0200;
@@ -83,6 +89,7 @@ const WM_XBUTTONUP: Uint = 0x020C;
 const WM_SETFONT: Uint = 0x0030;
 const WM_SETICON: Uint = 0x0080;
 const WM_APP_MACRO_DONE: Uint = 0x8001;
+const WM_APP_TRAY: Uint = 0x8002;
 
 const EM_SETMARGINS: Uint = 0x00D3;
 const EM_SETLIMITTEXT: Uint = 0x00C5;
@@ -92,6 +99,8 @@ const EC_RIGHTMARGIN: Wparam = 0x0002;
 const GWLP_USERDATA: i32 = -21;
 const TIMER_COUNTDOWN: usize = 1;
 const TIMER_CAPTURE: usize = 2;
+const EMERGENCY_HOTKEY_ID: i32 = 1;
+const TRAY_ICON_ID: Uint = 1;
 const GA_ROOT: Uint = 2;
 const MAPVK_VK_TO_VSC: Uint = 0;
 const PROCESS_QUERY_LIMITED_INFORMATION: Dword = 0x1000;
@@ -109,6 +118,7 @@ const DT_LEFT: Uint = 0x0000;
 const DT_CENTER: Uint = 0x0001;
 const DT_RIGHT: Uint = 0x0002;
 const DT_VCENTER: Uint = 0x0004;
+const DT_WORDBREAK: Uint = 0x0010;
 const DT_SINGLELINE: Uint = 0x0020;
 const DT_NOPREFIX: Uint = 0x0800;
 const DT_END_ELLIPSIS: Uint = 0x8000;
@@ -135,6 +145,8 @@ const VK_RETURN: u16 = 0x0D;
 const VK_ESCAPE: u16 = 0x1B;
 const VK_F8: u16 = 0x77;
 const VK_F9: u16 = 0x78;
+const VK_F12: Uint = 0x7B;
+const VK_PAUSE: Uint = 0x13;
 const WH_KEYBOARD_LL: i32 = 13;
 const WH_MOUSE_LL: i32 = 14;
 const HC_ACTION: i32 = 0;
@@ -142,6 +154,30 @@ const LLKHF_INJECTED: Dword = 0x10;
 const LLMHF_INJECTED: Dword = 0x01;
 const XBUTTON1: u16 = 1;
 const XBUTTON2: u16 = 2;
+const MOD_ALT: Uint = 0x0001;
+const MOD_CONTROL: Uint = 0x0002;
+const MOD_SHIFT: Uint = 0x0004;
+const MOD_NOREPEAT: Uint = 0x4000;
+const SIZE_MINIMIZED: Wparam = 1;
+const NIM_ADD: Dword = 0x0000_0000;
+const NIM_MODIFY: Dword = 0x0000_0001;
+const NIM_DELETE: Dword = 0x0000_0002;
+const NIF_MESSAGE: Uint = 0x0000_0001;
+const NIF_ICON: Uint = 0x0000_0002;
+const NIF_TIP: Uint = 0x0000_0004;
+const NIF_INFO: Uint = 0x0000_0010;
+const NIIF_INFO: Dword = 0x0000_0001;
+const MF_STRING: Uint = 0x0000_0000;
+const MF_SEPARATOR: Uint = 0x0000_0800;
+const TPM_RIGHTBUTTON: Uint = 0x0002;
+const TPM_BOTTOMALIGN: Uint = 0x0020;
+const MENU_OPEN: usize = 9_001;
+const MENU_STOP_ALL: usize = 9_002;
+const MENU_EXIT: usize = 9_003;
+#[cfg(not(test))]
+const HKEY_CURRENT_USER: isize = 0x8000_0001u32 as isize;
+#[cfg(not(test))]
+const REG_SZ: Dword = 1;
 #[cfg(test)]
 const ES_MULTILINE: Dword = 0x0004;
 #[cfg(test)]
@@ -165,6 +201,7 @@ const ICON_BIG: Wparam = 1;
 
 const CLIENT_WIDTH: i32 = 520;
 const MACRO_CLIENT_WIDTH: i32 = 1120;
+const SETTINGS_CLIENT_WIDTH: i32 = 820;
 const CLIENT_HEIGHT: i32 = 650;
 const MAX_RECORDED_EVENTS: usize = 10_000;
 const SWP_NOMOVE: Uint = 0x0002;
@@ -195,11 +232,14 @@ const COLOR_ERROR: u32 = rgb(244, 91, 105);
 static TEST_INPUT_TARGET: AtomicIsize = AtomicIsize::new(0);
 #[cfg(test)]
 static TEST_MACRO_INPUT_COUNT: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static TEST_AUTOSTART_ENABLED: AtomicBool = AtomicBool::new(false);
 static APP_STATE_POINTER: AtomicPtr<AppState> = AtomicPtr::new(null_mut());
 static MACRO_PLAYING: AtomicBool = AtomicBool::new(false);
 static MACRO_PLAYING_ID: AtomicU32 = AtomicU32::new(0);
 static MACRO_STOP: AtomicBool = AtomicBool::new(false);
 static TRIGGER_HELD: AtomicBool = AtomicBool::new(false);
+static EMERGENCY_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 const fn rgb(red: u8, green: u8, blue: u8) -> u32 {
     red as u32 | ((green as u32) << 8) | ((blue as u32) << 16)
@@ -382,6 +422,39 @@ struct Input {
     data: InputData,
 }
 
+#[repr(C)]
+struct Guid {
+    data1: u32,
+    data2: u16,
+    data3: u16,
+    data4: [u8; 8],
+}
+
+#[repr(C)]
+struct NotifyIconDataW {
+    size: Dword,
+    window: Hwnd,
+    id: Uint,
+    flags: Uint,
+    callback_message: Uint,
+    icon: Hicon,
+    tip: [u16; 128],
+    state: Dword,
+    state_mask: Dword,
+    info: [u16; 256],
+    timeout_or_version: Uint,
+    info_title: [u16; 64],
+    info_flags: Dword,
+    guid: Guid,
+    balloon_icon: Hicon,
+}
+
+impl Default for NotifyIconDataW {
+    fn default() -> Self {
+        unsafe { zeroed() }
+    }
+}
+
 #[link(name = "user32")]
 unsafe extern "system" {
     fn RegisterClassW(class: *const WndClassW) -> u16;
@@ -467,6 +540,21 @@ unsafe extern "system" {
     fn SetProcessDpiAwarenessContext(value: isize) -> Bool;
     fn SendInput(count: Uint, inputs: *const Input, input_size: i32) -> Uint;
     fn PostMessageW(window: Hwnd, message: Uint, wparam: Wparam, lparam: Lparam) -> Bool;
+    fn RegisterHotKey(window: Hwnd, id: i32, modifiers: Uint, virtual_key: Uint) -> Bool;
+    fn UnregisterHotKey(window: Hwnd, id: i32) -> Bool;
+    fn CreatePopupMenu() -> Hmenu;
+    fn AppendMenuW(menu: Hmenu, flags: Uint, id: usize, text: *const u16) -> Bool;
+    fn TrackPopupMenu(
+        menu: Hmenu,
+        flags: Uint,
+        x: i32,
+        y: i32,
+        reserved: i32,
+        window: Hwnd,
+        rect: *const Rect,
+    ) -> Bool;
+    fn DestroyMenu(menu: Hmenu) -> Bool;
+    fn DestroyIcon(icon: Hicon) -> Bool;
     fn SetWindowsHookExW(
         hook_id: i32,
         callback: Option<unsafe extern "system" fn(i32, Wparam, Lparam) -> Lresult>,
@@ -490,6 +578,25 @@ unsafe extern "system" {
     fn ReleaseDC(window: Hwnd, dc: Hdc) -> i32;
     #[cfg(test)]
     fn PrintWindow(window: Hwnd, dc: Hdc, flags: Uint) -> Bool;
+}
+
+#[link(name = "shell32")]
+unsafe extern "system" {
+    fn Shell_NotifyIconW(message: Dword, data: *mut NotifyIconDataW) -> Bool;
+}
+
+#[cfg(not(test))]
+#[link(name = "advapi32")]
+unsafe extern "system" {
+    fn RegSetKeyValueW(
+        key: isize,
+        sub_key: *const u16,
+        value_name: *const u16,
+        kind: Dword,
+        data: *const c_void,
+        data_size: Dword,
+    ) -> i32;
+    fn RegDeleteKeyValueW(key: isize, sub_key: *const u16, value_name: *const u16) -> i32;
 }
 
 #[link(name = "kernel32")]
@@ -601,6 +708,7 @@ enum ActionMode {
 enum AppTab {
     Timer,
     Macro,
+    Settings,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -630,6 +738,7 @@ enum HitTarget {
     None,
     TimerTab,
     MacroTab,
+    SettingsTab,
     AddThirtyMinutes,
     AddOneHour,
     AddThreeHours,
@@ -649,9 +758,24 @@ enum HitTarget {
     MacroDelayMinus,
     MacroDelayPlus,
     MacroDelayApply,
+    MacroEventUp,
+    MacroEventDown,
+    MacroEventDuplicate,
+    MacroEventDelete,
+    MacroInsertDelay,
+    MacroDuplicate,
+    MacroDelete,
     MacroRecord,
     MacroClear,
     MacroSave,
+    SettingMinimizeTray,
+    SettingCloseTray,
+    SettingAutoStart,
+    SettingEmergencyHotkey(EmergencyHotkey),
+    SettingEmergencyTimers,
+    SettingMaxRuntime(u32),
+    SettingMaxRepeats(u32),
+    SettingTestEmergency,
 }
 
 #[derive(Clone)]
@@ -711,6 +835,13 @@ struct AppState {
     tracking_mouse: bool,
     macro_library: MacroLibrary,
     macro_path: PathBuf,
+    settings: AppSettings,
+    settings_path: PathBuf,
+    settings_status_kind: StatusKind,
+    settings_status: String,
+    tray_icon: Hicon,
+    tray_added: bool,
+    exit_requested: bool,
     macro_status_kind: StatusKind,
     macro_status: String,
     macro_dirty: bool,
@@ -741,6 +872,20 @@ impl AppState {
                 format!("File macro tidak dapat dibaca: {error}"),
             ),
         };
+        let settings_path = default_settings_path();
+        let (settings, settings_status_kind, settings_status) = match load_settings(&settings_path)
+        {
+            Ok(settings) => (
+                settings,
+                StatusKind::Ready,
+                "Pengaturan aktif dan disimpan otomatis.".to_owned(),
+            ),
+            Err(error) => (
+                AppSettings::default(),
+                StatusKind::Warning,
+                format!("Pengaturan lama diabaikan: {error}"),
+            ),
+        };
         Self {
             window: 0,
             tab: AppTab::Timer,
@@ -768,6 +913,13 @@ impl AppState {
             tracking_mouse: false,
             macro_library,
             macro_path,
+            settings,
+            settings_path,
+            settings_status_kind,
+            settings_status,
+            tray_icon: 0,
+            tray_added: false,
+            exit_requested: false,
             macro_status_kind,
             macro_status,
             macro_dirty: false,
@@ -856,6 +1008,10 @@ impl AppState {
                 UnhookWindowsHookEx(self.mouse_hook);
                 self.mouse_hook = 0;
             }
+            UnregisterHotKey(self.window, EMERGENCY_HOTKEY_ID);
+            if self.tray_added {
+                remove_tray_icon(self);
+            }
         }
     }
 }
@@ -867,8 +1023,9 @@ const RECT_PICK_TARGET: Rect = Rect::new(358, 309, 474, 351);
 const RECT_MODE_ENTER: Rect = Rect::new(42, 424, 249, 462);
 const RECT_MODE_TEXT: Rect = Rect::new(251, 424, 458, 462);
 const RECT_MAIN_ACTION: Rect = Rect::new(24, 548, 496, 604);
-const RECT_TAB_TIMER: Rect = Rect::new(300, 24, 382, 54);
-const RECT_TAB_MACRO: Rect = Rect::new(386, 24, 482, 54);
+const RECT_TAB_TIMER: Rect = Rect::new(252, 24, 322, 54);
+const RECT_TAB_MACRO: Rect = Rect::new(326, 24, 396, 54);
+const RECT_TAB_SETTINGS: Rect = Rect::new(400, 24, 496, 54);
 const RECT_MACRO_NEW: Rect = Rect::new(42, 117, 218, 157);
 const RECT_MACRO_MODE_NO_REPEAT: Rect = Rect::new(278, 173, 428, 239);
 const RECT_MACRO_MODE_HOLD: Rect = Rect::new(438, 173, 588, 239);
@@ -886,6 +1043,30 @@ const RECT_MACRO_TARGET_PICK: Rect = Rect::new(946, 216, 1080, 256);
 const RECT_MACRO_DELAY_MINUS: Rect = Rect::new(946, 393, 982, 429);
 const RECT_MACRO_DELAY_PLUS: Rect = Rect::new(1044, 393, 1080, 429);
 const RECT_MACRO_DELAY_APPLY: Rect = Rect::new(946, 440, 1080, 480);
+const RECT_MACRO_EVENT_UP: Rect = Rect::new(946, 486, 1008, 522);
+const RECT_MACRO_EVENT_DOWN: Rect = Rect::new(1016, 486, 1080, 522);
+const RECT_MACRO_EVENT_DUPLICATE: Rect = Rect::new(946, 530, 1008, 566);
+const RECT_MACRO_EVENT_DELETE: Rect = Rect::new(1016, 530, 1080, 566);
+const RECT_MACRO_INSERT_DELAY: Rect = Rect::new(644, 548, 748, 596);
+const RECT_MACRO_DUPLICATE: Rect = Rect::new(42, 548, 126, 590);
+const RECT_MACRO_DELETE: Rect = Rect::new(134, 548, 218, 590);
+
+const RECT_SETTING_MINIMIZE_TRAY: Rect = Rect::new(42, 178, 382, 224);
+const RECT_SETTING_CLOSE_TRAY: Rect = Rect::new(42, 238, 382, 284);
+const RECT_SETTING_AUTO_START: Rect = Rect::new(42, 298, 382, 344);
+const RECT_SETTING_HOTKEY_1: Rect = Rect::new(438, 178, 772, 218);
+const RECT_SETTING_HOTKEY_2: Rect = Rect::new(438, 226, 772, 266);
+const RECT_SETTING_HOTKEY_3: Rect = Rect::new(438, 274, 772, 314);
+const RECT_SETTING_STOP_TIMERS: Rect = Rect::new(438, 332, 772, 376);
+const RECT_SETTING_RUNTIME_5: Rect = Rect::new(438, 411, 514, 449);
+const RECT_SETTING_RUNTIME_30: Rect = Rect::new(522, 411, 598, 449);
+const RECT_SETTING_RUNTIME_60: Rect = Rect::new(606, 411, 682, 449);
+const RECT_SETTING_RUNTIME_OFF: Rect = Rect::new(690, 411, 772, 449);
+const RECT_SETTING_REPEAT_100: Rect = Rect::new(438, 493, 514, 531);
+const RECT_SETTING_REPEAT_1000: Rect = Rect::new(522, 493, 598, 531);
+const RECT_SETTING_REPEAT_10000: Rect = Rect::new(606, 493, 682, 531);
+const RECT_SETTING_REPEAT_OFF: Rect = Rect::new(690, 493, 772, 531);
+const RECT_SETTING_TEST_EMERGENCY: Rect = Rect::new(24, 548, 796, 604);
 
 fn macro_trigger_rect(index: usize) -> Rect {
     let left = 278 + index as i32 * 116;
@@ -917,6 +1098,17 @@ fn high_word(value: Lparam) -> i32 {
     ((value as u32 >> 16) & 0xFFFF) as i16 as i32
 }
 
+fn copy_wide<const N: usize>(destination: &mut [u16; N], value: &str) {
+    destination.fill(0);
+    for (slot, character) in destination
+        .iter_mut()
+        .take(N.saturating_sub(1))
+        .zip(value.encode_utf16())
+    {
+        *slot = character;
+    }
+}
+
 fn hit_test(x: i32, y: i32, state: &AppState) -> HitTarget {
     if RECT_TAB_TIMER.contains(x, y) {
         return HitTarget::TimerTab;
@@ -924,11 +1116,60 @@ fn hit_test(x: i32, y: i32, state: &AppState) -> HitTarget {
     if RECT_TAB_MACRO.contains(x, y) {
         return HitTarget::MacroTab;
     }
+    if RECT_TAB_SETTINGS.contains(x, y) {
+        return HitTarget::SettingsTab;
+    }
+    if state.tab == AppTab::Settings {
+        for (rect, target) in [
+            (RECT_SETTING_MINIMIZE_TRAY, HitTarget::SettingMinimizeTray),
+            (RECT_SETTING_CLOSE_TRAY, HitTarget::SettingCloseTray),
+            (RECT_SETTING_AUTO_START, HitTarget::SettingAutoStart),
+            (
+                RECT_SETTING_HOTKEY_1,
+                HitTarget::SettingEmergencyHotkey(EmergencyHotkey::CtrlAltF12),
+            ),
+            (
+                RECT_SETTING_HOTKEY_2,
+                HitTarget::SettingEmergencyHotkey(EmergencyHotkey::CtrlShiftF12),
+            ),
+            (
+                RECT_SETTING_HOTKEY_3,
+                HitTarget::SettingEmergencyHotkey(EmergencyHotkey::CtrlAltPause),
+            ),
+            (RECT_SETTING_STOP_TIMERS, HitTarget::SettingEmergencyTimers),
+            (RECT_SETTING_RUNTIME_5, HitTarget::SettingMaxRuntime(5 * 60)),
+            (
+                RECT_SETTING_RUNTIME_30,
+                HitTarget::SettingMaxRuntime(30 * 60),
+            ),
+            (
+                RECT_SETTING_RUNTIME_60,
+                HitTarget::SettingMaxRuntime(60 * 60),
+            ),
+            (RECT_SETTING_RUNTIME_OFF, HitTarget::SettingMaxRuntime(0)),
+            (RECT_SETTING_REPEAT_100, HitTarget::SettingMaxRepeats(100)),
+            (
+                RECT_SETTING_REPEAT_1000,
+                HitTarget::SettingMaxRepeats(1_000),
+            ),
+            (
+                RECT_SETTING_REPEAT_10000,
+                HitTarget::SettingMaxRepeats(10_000),
+            ),
+            (RECT_SETTING_REPEAT_OFF, HitTarget::SettingMaxRepeats(0)),
+            (RECT_SETTING_TEST_EMERGENCY, HitTarget::SettingTestEmergency),
+        ] {
+            if rect.contains(x, y) {
+                return target;
+            }
+        }
+        return HitTarget::None;
+    }
     if state.tab == AppTab::Macro {
         if RECT_MACRO_NEW.contains(x, y) {
             return HitTarget::MacroNew;
         }
-        for (index, _) in state.macro_library.macros.iter().take(7).enumerate() {
+        for (index, _) in state.macro_library.macros.iter().take(6).enumerate() {
             if macro_item_rect(index).contains(x, y) {
                 return HitTarget::MacroItem(index);
             }
@@ -958,12 +1199,12 @@ fn hit_test(x: i32, y: i32, state: &AppState) -> HitTarget {
             }
         }
         if let Some(item) = state.macro_library.selected() {
-            for (index, event) in lane_events(item, state.macro_lane)
+            for (index, _event) in lane_events(item, state.macro_lane)
                 .iter()
                 .take(18)
                 .enumerate()
             {
-                if matches!(event, MacroEvent::Delay(_)) && macro_event_rect(index).contains(x, y) {
+                if macro_event_rect(index).contains(x, y) {
                     return HitTarget::MacroEvent(index);
                 }
             }
@@ -985,6 +1226,19 @@ fn hit_test(x: i32, y: i32, state: &AppState) -> HitTarget {
         }
         if RECT_MACRO_DELAY_APPLY.contains(x, y) {
             return HitTarget::MacroDelayApply;
+        }
+        for (rect, target) in [
+            (RECT_MACRO_EVENT_UP, HitTarget::MacroEventUp),
+            (RECT_MACRO_EVENT_DOWN, HitTarget::MacroEventDown),
+            (RECT_MACRO_EVENT_DUPLICATE, HitTarget::MacroEventDuplicate),
+            (RECT_MACRO_EVENT_DELETE, HitTarget::MacroEventDelete),
+            (RECT_MACRO_INSERT_DELAY, HitTarget::MacroInsertDelay),
+            (RECT_MACRO_DUPLICATE, HitTarget::MacroDuplicate),
+            (RECT_MACRO_DELETE, HitTarget::MacroDelete),
+        ] {
+            if rect.contains(x, y) {
+                return target;
+            }
         }
         if RECT_MACRO_RECORD.contains(x, y) {
             return HitTarget::MacroRecord;
@@ -1252,10 +1506,10 @@ unsafe fn draw_clock_mark(dc: Hdc) {
 }
 
 unsafe fn draw_status_pill(dc: Hdc, state: &AppState) {
-    let kind = if state.tab == AppTab::Macro {
-        state.macro_status_kind
-    } else {
-        state.status_kind
+    let kind = match state.tab {
+        AppTab::Timer => state.status_kind,
+        AppTab::Macro => state.macro_status_kind,
+        AppTab::Settings => state.settings_status_kind,
     };
     let (label, dot_color, width) = match kind {
         StatusKind::Ready => ("Siap", COLOR_MUTED, 58),
@@ -1264,10 +1518,10 @@ unsafe fn draw_status_pill(dc: Hdc, state: &AppState) {
         StatusKind::Warning => ("Periksa", COLOR_WARNING, 76),
         StatusKind::Error => ("Gagal", COLOR_ERROR, 64),
     };
-    let right = if state.tab == AppTab::Macro {
-        1096
-    } else {
-        496
+    let right = match state.tab {
+        AppTab::Timer => 496,
+        AppTab::Macro => 1096,
+        AppTab::Settings => 796,
     };
     let rect = Rect::new(right - width, 26, right, 50);
     unsafe {
@@ -1298,6 +1552,12 @@ unsafe fn draw_tabs(dc: Hdc, state: &AppState) {
                 "Macro",
                 HitTarget::MacroTab,
                 state.tab == AppTab::Macro,
+            ),
+            (
+                RECT_TAB_SETTINGS,
+                "Settings",
+                HitTarget::SettingsTab,
+                state.tab == AppTab::Settings,
             ),
         ] {
             draw_label(
@@ -1483,7 +1743,7 @@ unsafe fn draw_brand_header_v3(dc: Hdc, state: &AppState) {
             DT_LEFT | DT_VCENTER | DT_SINGLELINE,
         );
         draw_tabs(dc, state);
-        if state.tab == AppTab::Macro {
+        if state.tab != AppTab::Timer {
             draw_status_pill(dc, state);
         }
     }
@@ -1779,7 +2039,7 @@ unsafe fn draw_macro_interface_v3(dc: Hdc, state: &AppState) {
             state.hot == HitTarget::MacroNew,
             state.fonts.small,
         );
-        for (index, item) in state.macro_library.macros.iter().take(7).enumerate() {
+        for (index, item) in state.macro_library.macros.iter().take(6).enumerate() {
             let rect = macro_item_rect(index);
             let selected = item.id == state.macro_library.selected_id;
             if selected {
@@ -1819,6 +2079,24 @@ unsafe fn draw_macro_interface_v3(dc: Hdc, state: &AppState) {
                 DT_LEFT | DT_VCENTER | DT_SINGLELINE,
             );
         }
+        draw_flat_button(
+            dc,
+            RECT_MACRO_DUPLICATE,
+            "Salin",
+            COLOR_INK,
+            COLOR_TEXT,
+            state.hot == HitTarget::MacroDuplicate,
+            state.fonts.small,
+        );
+        draw_flat_button(
+            dc,
+            RECT_MACRO_DELETE,
+            "Hapus",
+            COLOR_INK,
+            COLOR_ERROR,
+            state.hot == HitTarget::MacroDelete,
+            state.fonts.small,
+        );
 
         let editor_panel = Rect::new(252, 84, 1096, 608);
         rounded_box(dc, editor_panel, 24, COLOR_PANEL, COLOR_PANEL_BORDER);
@@ -2050,6 +2328,15 @@ unsafe fn draw_macro_interface_v3(dc: Hdc, state: &AppState) {
             state.hot == HitTarget::MacroRecord,
             state.fonts.semibold,
         );
+        draw_flat_button(
+            dc,
+            RECT_MACRO_INSERT_DELAY,
+            "+ Delay",
+            COLOR_PANEL_2,
+            COLOR_TEXT,
+            state.hot == HitTarget::MacroInsertDelay,
+            state.fonts.small,
+        );
 
         rounded_box(
             dc,
@@ -2149,13 +2436,17 @@ unsafe fn draw_macro_interface_v3(dc: Hdc, state: &AppState) {
         );
         draw_label(
             dc,
-            if selected_delay(state).is_some() {
-                "Edit chip ms terpilih"
+            if state.macro_selected_event.is_some() {
+                if selected_delay(state).is_some() {
+                    "Edit delay terpilih"
+                } else {
+                    "Langkah terpilih"
+                }
             } else {
-                "Klik chip ms"
+                "Klik langkah timeline"
             },
             Rect::new(946, 364, 1080, 387),
-            if selected_delay(state).is_some() {
+            if state.macro_selected_event.is_some() {
                 COLOR_TEXT
             } else {
                 COLOR_DIM
@@ -2206,14 +2497,35 @@ unsafe fn draw_macro_interface_v3(dc: Hdc, state: &AppState) {
             delay_active && state.hot == HitTarget::MacroDelayApply,
             state.fonts.small,
         );
-        draw_label(
-            dc,
-            "0—60000 ms",
-            Rect::new(946, 486, 1080, 509),
-            COLOR_DIM,
-            state.fonts.small,
-            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-        );
+        let event_active = state.macro_selected_event.is_some();
+        for (rect, label, target) in [
+            (RECT_MACRO_EVENT_UP, "↑", HitTarget::MacroEventUp),
+            (RECT_MACRO_EVENT_DOWN, "↓", HitTarget::MacroEventDown),
+            (
+                RECT_MACRO_EVENT_DUPLICATE,
+                "Salin",
+                HitTarget::MacroEventDuplicate,
+            ),
+            (
+                RECT_MACRO_EVENT_DELETE,
+                "Hapus",
+                HitTarget::MacroEventDelete,
+            ),
+        ] {
+            draw_flat_button(
+                dc,
+                rect,
+                label,
+                if event_active {
+                    COLOR_PANEL_2
+                } else {
+                    COLOR_BG
+                },
+                if event_active { COLOR_TEXT } else { COLOR_DIM },
+                event_active && state.hot == target,
+                state.fonts.small,
+            );
+        }
         draw_flat_button(
             dc,
             RECT_MACRO_CLEAR,
@@ -2260,6 +2572,231 @@ unsafe fn draw_redesigned_interface(dc: Hdc, state: &AppState) {
     match state.tab {
         AppTab::Timer => unsafe { draw_timer_interface_v3(dc, state) },
         AppTab::Macro => unsafe { draw_macro_interface_v3(dc, state) },
+        AppTab::Settings => unsafe { draw_settings_interface(dc, state) },
+    }
+}
+
+unsafe fn draw_settings_interface(dc: Hdc, state: &AppState) {
+    unsafe {
+        fill_rect_color(
+            dc,
+            Rect::new(0, 0, SETTINGS_CLIENT_WIDTH, CLIENT_HEIGHT),
+            COLOR_BG,
+        );
+        draw_brand_header_v3(dc, state);
+        draw_label(
+            dc,
+            "Kontrol & keselamatan",
+            Rect::new(24, 78, 500, 112),
+            COLOR_TEXT,
+            state.fonts.title,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
+        draw_label(
+            dc,
+            "Semua perubahan disimpan otomatis. Hotkey darurat selalu menghentikan macro.",
+            Rect::new(24, 107, 790, 132),
+            COLOR_MUTED,
+            state.fonts.small,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
+
+        rounded_box(
+            dc,
+            Rect::new(24, 136, 400, 536),
+            24,
+            COLOR_PANEL,
+            COLOR_PANEL_BORDER,
+        );
+        draw_label(
+            dc,
+            "TRAY & STARTUP",
+            Rect::new(42, 146, 382, 170),
+            COLOR_ACCENT,
+            state.fonts.small,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
+        for (rect, label, active, target) in [
+            (
+                RECT_SETTING_MINIMIZE_TRAY,
+                "Minimize ke system tray",
+                state.settings.minimize_to_tray,
+                HitTarget::SettingMinimizeTray,
+            ),
+            (
+                RECT_SETTING_CLOSE_TRAY,
+                "Tombol X tetap di tray",
+                state.settings.close_to_tray,
+                HitTarget::SettingCloseTray,
+            ),
+            (
+                RECT_SETTING_AUTO_START,
+                "Mulai bersama Windows",
+                state.settings.auto_start,
+                HitTarget::SettingAutoStart,
+            ),
+        ] {
+            draw_flat_button(
+                dc,
+                rect,
+                &format!("{}    {}", label, if active { "AKTIF" } else { "NONAKTIF" }),
+                if active {
+                    COLOR_ACCENT_DARK
+                } else {
+                    COLOR_PANEL_2
+                },
+                if active { COLOR_ACCENT } else { COLOR_TEXT },
+                state.hot == target,
+                state.fonts.small,
+            );
+        }
+        draw_hairline(dc, 42, 370, 382, COLOR_PANEL_BORDER);
+        draw_label(
+            dc,
+            "Tray menjaga timer dan macro tetap berjalan saat jendela disembunyikan.",
+            Rect::new(42, 390, 382, 438),
+            COLOR_MUTED,
+            state.fonts.body,
+            DT_LEFT | DT_WORDBREAK,
+        );
+        draw_label(
+            dc,
+            "Auto Start memakai registry Current User—tidak memerlukan Administrator.",
+            Rect::new(42, 456, 382, 510),
+            COLOR_DIM,
+            state.fonts.small,
+            DT_LEFT | DT_WORDBREAK,
+        );
+
+        rounded_box(
+            dc,
+            Rect::new(416, 136, 796, 536),
+            24,
+            COLOR_PANEL,
+            COLOR_PANEL_BORDER,
+        );
+        draw_label(
+            dc,
+            "EMERGENCY STOP",
+            Rect::new(438, 146, 772, 170),
+            COLOR_ERROR,
+            state.fonts.small,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
+        for (index, hotkey) in EmergencyHotkey::ALL.into_iter().enumerate() {
+            let rect = [
+                RECT_SETTING_HOTKEY_1,
+                RECT_SETTING_HOTKEY_2,
+                RECT_SETTING_HOTKEY_3,
+            ][index];
+            let active = state.settings.emergency_hotkey == hotkey;
+            draw_flat_button(
+                dc,
+                rect,
+                hotkey.label(),
+                if active { COLOR_ACCENT } else { COLOR_PANEL_2 },
+                if active { COLOR_INK } else { COLOR_TEXT },
+                state.hot == HitTarget::SettingEmergencyHotkey(hotkey),
+                state.fonts.small,
+            );
+        }
+        draw_flat_button(
+            dc,
+            RECT_SETTING_STOP_TIMERS,
+            if state.settings.emergency_stops_timers {
+                "Emergency juga membatalkan semua timer"
+            } else {
+                "Emergency hanya menghentikan macro"
+            },
+            if state.settings.emergency_stops_timers {
+                COLOR_ACCENT_DARK
+            } else {
+                COLOR_PANEL_2
+            },
+            if state.settings.emergency_stops_timers {
+                COLOR_ACCENT
+            } else {
+                COLOR_TEXT
+            },
+            state.hot == HitTarget::SettingEmergencyTimers,
+            state.fonts.small,
+        );
+        draw_label(
+            dc,
+            "Batas durasi Toggle",
+            Rect::new(438, 382, 772, 407),
+            COLOR_MUTED,
+            state.fonts.small,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
+        for (rect, label, value) in [
+            (RECT_SETTING_RUNTIME_5, "5 mnt", 5 * 60),
+            (RECT_SETTING_RUNTIME_30, "30 mnt", 30 * 60),
+            (RECT_SETTING_RUNTIME_60, "60 mnt", 60 * 60),
+            (RECT_SETTING_RUNTIME_OFF, "Tanpa", 0),
+        ] {
+            let active = state.settings.max_macro_runtime_seconds == value;
+            draw_flat_button(
+                dc,
+                rect,
+                label,
+                if active { COLOR_INK } else { COLOR_PANEL_2 },
+                if active { COLOR_ACCENT } else { COLOR_TEXT },
+                state.hot == HitTarget::SettingMaxRuntime(value),
+                state.fonts.small,
+            );
+        }
+        draw_label(
+            dc,
+            "Batas pengulangan",
+            Rect::new(438, 457, 772, 486),
+            COLOR_MUTED,
+            state.fonts.small,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
+        for (rect, label, value) in [
+            (RECT_SETTING_REPEAT_100, "100×", 100),
+            (RECT_SETTING_REPEAT_1000, "1K×", 1_000),
+            (RECT_SETTING_REPEAT_10000, "10K×", 10_000),
+            (RECT_SETTING_REPEAT_OFF, "Tanpa", 0),
+        ] {
+            let active = state.settings.max_macro_repeats == value;
+            draw_flat_button(
+                dc,
+                rect,
+                label,
+                if active { COLOR_INK } else { COLOR_PANEL_2 },
+                if active { COLOR_ACCENT } else { COLOR_TEXT },
+                state.hot == HitTarget::SettingMaxRepeats(value),
+                state.fonts.small,
+            );
+        }
+
+        draw_flat_button(
+            dc,
+            RECT_SETTING_TEST_EMERGENCY,
+            "Hentikan semua sekarang",
+            COLOR_ERROR,
+            COLOR_TEXT,
+            state.hot == HitTarget::SettingTestEmergency,
+            state.fonts.semibold,
+        );
+        let status_color = match state.settings_status_kind {
+            StatusKind::Ready => COLOR_MUTED,
+            StatusKind::Running => COLOR_ACCENT,
+            StatusKind::Sent => COLOR_SUCCESS,
+            StatusKind::Warning => COLOR_WARNING,
+            StatusKind::Error => COLOR_ERROR,
+        };
+        filled_circle(dc, Rect::new(28, 622, 36, 630), status_color);
+        draw_label(
+            dc,
+            &state.settings_status,
+            Rect::new(46, 610, 792, 642),
+            COLOR_MUTED,
+            state.fonts.small,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+        );
     }
 }
 
@@ -3095,6 +3632,208 @@ unsafe fn initialize_controls(state: &mut AppState, instance: Hinstance) {
     }
 }
 
+fn hotkey_parts(hotkey: EmergencyHotkey) -> (Uint, Uint) {
+    match hotkey {
+        EmergencyHotkey::CtrlAltF12 => (MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_F12),
+        EmergencyHotkey::CtrlShiftF12 => (MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT, VK_F12),
+        EmergencyHotkey::CtrlAltPause => (MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_PAUSE),
+    }
+}
+
+unsafe fn register_emergency_hotkey(state: &mut AppState) -> Result<(), String> {
+    unsafe { UnregisterHotKey(state.window, EMERGENCY_HOTKEY_ID) };
+    let (modifiers, key) = hotkey_parts(state.settings.emergency_hotkey);
+    if unsafe { RegisterHotKey(state.window, EMERGENCY_HOTKEY_ID, modifiers, key) } == FALSE {
+        return Err(format!(
+            "Hotkey {} sedang dipakai aplikasi lain.",
+            state.settings.emergency_hotkey.label()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+unsafe fn configure_auto_start(enabled: bool) -> Result<(), String> {
+    TEST_AUTOSTART_ENABLED.store(enabled, Ordering::Release);
+    Ok(())
+}
+
+#[cfg(not(test))]
+unsafe fn configure_auto_start(enabled: bool) -> Result<(), String> {
+    let key = wide("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
+    let value_name = wide("VibeTimer");
+    let status = if enabled {
+        let executable = std::env::current_exe()
+            .map_err(|error| format!("Lokasi VibeTimer tidak ditemukan: {error}"))?;
+        let command = format!("\"{}\" --background", executable.display());
+        let data = wide(&command);
+        unsafe {
+            RegSetKeyValueW(
+                HKEY_CURRENT_USER,
+                key.as_ptr(),
+                value_name.as_ptr(),
+                REG_SZ,
+                data.as_ptr().cast(),
+                (data.len() * size_of::<u16>()) as Dword,
+            )
+        }
+    } else {
+        unsafe { RegDeleteKeyValueW(HKEY_CURRENT_USER, key.as_ptr(), value_name.as_ptr()) }
+    };
+    if status == 0 || (!enabled && status == 2) {
+        Ok(())
+    } else {
+        Err(format!(
+            "Windows menolak perubahan Auto Start (kode {status})."
+        ))
+    }
+}
+
+unsafe fn persist_settings(state: &mut AppState, message: &str) -> bool {
+    match save_settings(&state.settings_path, &state.settings) {
+        Ok(()) => {
+            state.settings_status_kind = StatusKind::Sent;
+            state.settings_status = message.to_owned();
+            unsafe { InvalidateRect(state.window, null(), FALSE) };
+            true
+        }
+        Err(error) => {
+            state.settings_status_kind = StatusKind::Error;
+            state.settings_status = format!("Pengaturan gagal disimpan: {error}");
+            unsafe { InvalidateRect(state.window, null(), FALSE) };
+            false
+        }
+    }
+}
+
+unsafe fn add_tray_icon(state: &mut AppState) -> Result<(), String> {
+    if state.tray_added {
+        return Ok(());
+    }
+    state.tray_icon = unsafe { create_app_icon(GetModuleHandleW(null()), 16) };
+    let mut data = NotifyIconDataW {
+        size: size_of::<NotifyIconDataW>() as Dword,
+        window: state.window,
+        id: TRAY_ICON_ID,
+        flags: NIF_MESSAGE | NIF_ICON | NIF_TIP,
+        callback_message: WM_APP_TRAY,
+        icon: state.tray_icon,
+        ..NotifyIconDataW::default()
+    };
+    copy_wide(&mut data.tip, "VibeTimer — siap");
+    if unsafe { Shell_NotifyIconW(NIM_ADD, &mut data) } == FALSE {
+        if state.tray_icon != 0 {
+            unsafe { DestroyIcon(state.tray_icon) };
+            state.tray_icon = 0;
+        }
+        return Err("System tray Windows menolak ikon VibeTimer.".to_owned());
+    }
+    state.tray_added = true;
+    Ok(())
+}
+
+unsafe fn remove_tray_icon(state: &mut AppState) {
+    if state.tray_added {
+        let mut data = NotifyIconDataW {
+            size: size_of::<NotifyIconDataW>() as Dword,
+            window: state.window,
+            id: TRAY_ICON_ID,
+            ..NotifyIconDataW::default()
+        };
+        unsafe { Shell_NotifyIconW(NIM_DELETE, &mut data) };
+        state.tray_added = false;
+    }
+    if state.tray_icon != 0 {
+        unsafe { DestroyIcon(state.tray_icon) };
+        state.tray_icon = 0;
+    }
+}
+
+unsafe fn show_tray_notification(state: &AppState, title: &str, message: &str) {
+    if !state.tray_added {
+        return;
+    }
+    let mut data = NotifyIconDataW {
+        size: size_of::<NotifyIconDataW>() as Dword,
+        window: state.window,
+        id: TRAY_ICON_ID,
+        flags: NIF_INFO,
+        info_flags: NIIF_INFO,
+        timeout_or_version: 5_000,
+        ..NotifyIconDataW::default()
+    };
+    copy_wide(&mut data.info_title, title);
+    copy_wide(&mut data.info, message);
+    unsafe { Shell_NotifyIconW(NIM_MODIFY, &mut data) };
+}
+
+unsafe fn restore_from_tray(state: &AppState) {
+    unsafe {
+        ShowWindow(state.window, SW_RESTORE);
+        SetForegroundWindow(state.window);
+    }
+}
+
+unsafe fn show_tray_menu(state: &AppState) {
+    let menu = unsafe { CreatePopupMenu() };
+    if menu == 0 {
+        return;
+    }
+    unsafe {
+        AppendMenuW(menu, MF_STRING, MENU_OPEN, wide("Buka VibeTimer").as_ptr());
+        AppendMenuW(
+            menu,
+            MF_STRING,
+            MENU_STOP_ALL,
+            wide("Emergency Stop").as_ptr(),
+        );
+        AppendMenuW(menu, MF_SEPARATOR, 0, null());
+        AppendMenuW(menu, MF_STRING, MENU_EXIT, wide("Keluar").as_ptr());
+        let mut point = Point::default();
+        GetCursorPos(&mut point);
+        SetForegroundWindow(state.window);
+        TrackPopupMenu(
+            menu,
+            TPM_RIGHTBUTTON | TPM_BOTTOMALIGN,
+            point.x,
+            point.y,
+            0,
+            state.window,
+            null(),
+        );
+        DestroyMenu(menu);
+    }
+}
+
+unsafe fn emergency_stop(state: &mut AppState, source: &str) {
+    if state.recording {
+        unsafe { stop_macro_recording(state) };
+    }
+    if MACRO_PLAYING.load(Ordering::Acquire) {
+        EMERGENCY_ACTIVE.store(true, Ordering::Release);
+    }
+    MACRO_STOP.store(true, Ordering::Release);
+    TRIGGER_HELD.store(false, Ordering::Release);
+    state.trigger_down = false;
+    state.trigger_macro_id = None;
+    if state.settings.emergency_stops_timers && state.running {
+        unsafe { cancel_timer(state) };
+    }
+    state.macro_status_kind = StatusKind::Warning;
+    state.macro_status = format!("Emergency Stop dari {source}: semua macro dihentikan.");
+    state.settings_status_kind = StatusKind::Warning;
+    state.settings_status = format!("Emergency Stop dijalankan dari {source}.");
+    unsafe {
+        show_tray_notification(
+            state,
+            "VibeTimer dihentikan",
+            "Semua macro berhenti. Timer mengikuti pengaturan Emergency Stop.",
+        );
+        MessageBeep(MB_ICONWARNING);
+        InvalidateRect(state.window, null(), FALSE);
+    }
+}
+
 unsafe fn get_window_text(window: Hwnd) -> String {
     unsafe {
         let length = GetWindowTextLengthW(window);
@@ -3902,10 +4641,10 @@ unsafe fn update_countdown(state: &mut AppState) {
 }
 
 unsafe fn resize_for_tab(state: &AppState) {
-    let client_width = if state.tab == AppTab::Macro {
-        MACRO_CLIENT_WIDTH
-    } else {
-        CLIENT_WIDTH
+    let client_width = match state.tab {
+        AppTab::Timer => CLIENT_WIDTH,
+        AppTab::Macro => MACRO_CLIENT_WIDTH,
+        AppTab::Settings => SETTINGS_CLIENT_WIDTH,
     };
     let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
     let mut outer = Rect::new(0, 0, client_width, CLIENT_HEIGHT);
@@ -4153,16 +4892,22 @@ fn play_macro_events(
 }
 
 fn post_macro_result(window: Hwnd, result: Result<(), String>) {
-    let result_code = match result {
-        Ok(()) => 1,
-        Err(message)
-            if message.contains("target")
-                || message.contains("Target")
-                || message.contains("Window") =>
-        {
-            2
+    let emergency = EMERGENCY_ACTIVE.swap(false, Ordering::AcqRel);
+    let result_code = if emergency {
+        4
+    } else {
+        match result {
+            Ok(()) => 1,
+            Err(message) if message.contains("Batas aman") => 3,
+            Err(message)
+                if message.contains("target")
+                    || message.contains("Target")
+                    || message.contains("Window") =>
+            {
+                2
+            }
+            Err(_) => 0,
         }
-        Err(_) => 0,
     };
     MACRO_PLAYING.store(false, Ordering::Release);
     MACRO_PLAYING_ID.store(0, Ordering::Release);
@@ -4172,7 +4917,35 @@ fn post_macro_result(window: Hwnd, result: Result<(), String>) {
     }
 }
 
-fn launch_macro_playback(window: Hwnd, item: MacroDefinition, destination: PlaybackDestination) {
+fn playback_limit_check(
+    started: Instant,
+    repeats: u32,
+    max_runtime_seconds: u32,
+    max_repeats: u32,
+) -> Result<(), String> {
+    if max_runtime_seconds > 0
+        && started.elapsed() >= Duration::from_secs(max_runtime_seconds as u64)
+    {
+        return Err(format!(
+            "Batas aman durasi {} detik tercapai.",
+            max_runtime_seconds
+        ));
+    }
+    if max_repeats > 0 && repeats >= max_repeats {
+        return Err(format!(
+            "Batas aman pengulangan {max_repeats} kali tercapai."
+        ));
+    }
+    Ok(())
+}
+
+fn launch_macro_playback(
+    window: Hwnd,
+    item: MacroDefinition,
+    destination: PlaybackDestination,
+    max_runtime_seconds: u32,
+    max_repeats: u32,
+) {
     if item.on_press.is_empty() && item.while_holding.is_empty() && item.on_release.is_empty() {
         unsafe { PostMessageW(window, WM_APP_MACRO_DONE, 0, 0) };
         return;
@@ -4195,6 +4968,8 @@ fn launch_macro_playback(window: Hwnd, item: MacroDefinition, destination: Playb
     MACRO_STOP.store(false, Ordering::Release);
     thread::spawn(move || {
         let standard = item.standard_delay_ms;
+        let started = Instant::now();
+        let mut repeats = 0u32;
         let result = (|| -> Result<(), String> {
             match item.mode {
                 MacroMode::NoRepeat => {
@@ -4204,9 +4979,11 @@ fn launch_macro_playback(window: Hwnd, item: MacroDefinition, destination: Playb
                     while TRIGGER_HELD.load(Ordering::Acquire)
                         && !MACRO_STOP.load(Ordering::Acquire)
                     {
+                        playback_limit_check(started, repeats, max_runtime_seconds, max_repeats)?;
                         if !play_macro_events(&item.on_press, standard, &destination)? {
                             break;
                         }
+                        repeats = repeats.saturating_add(1);
                         if item.on_press.is_empty() && !sleep_interruptible(10) {
                             break;
                         }
@@ -4214,9 +4991,11 @@ fn launch_macro_playback(window: Hwnd, item: MacroDefinition, destination: Playb
                 }
                 MacroMode::Toggle => {
                     while !MACRO_STOP.load(Ordering::Acquire) {
+                        playback_limit_check(started, repeats, max_runtime_seconds, max_repeats)?;
                         if !play_macro_events(&item.on_press, standard, &destination)? {
                             break;
                         }
+                        repeats = repeats.saturating_add(1);
                         if item.on_press.is_empty() && !sleep_interruptible(10) {
                             break;
                         }
@@ -4227,9 +5006,16 @@ fn launch_macro_playback(window: Hwnd, item: MacroDefinition, destination: Playb
                         while TRIGGER_HELD.load(Ordering::Acquire)
                             && !MACRO_STOP.load(Ordering::Acquire)
                         {
+                            playback_limit_check(
+                                started,
+                                repeats,
+                                max_runtime_seconds,
+                                max_repeats,
+                            )?;
                             if !play_macro_events(&item.while_holding, standard, &destination)? {
                                 break;
                             }
+                            repeats = repeats.saturating_add(1);
                             if item.while_holding.is_empty() && !sleep_interruptible(10) {
                                 break;
                             }
@@ -4382,7 +5168,13 @@ unsafe fn handle_trigger_down(state: &mut AppState, item: MacroDefinition) {
         }
     };
     unsafe { InvalidateRect(state.window, null(), FALSE) };
-    launch_macro_playback(state.window, item, destination);
+    launch_macro_playback(
+        state.window,
+        item,
+        destination,
+        state.settings.max_macro_runtime_seconds,
+        state.settings.max_macro_repeats,
+    );
 }
 
 fn handle_trigger_up(state: &mut AppState) {
@@ -4523,11 +5315,34 @@ unsafe fn initialize_macro_hooks(state: &mut AppState, instance: Hinstance) {
     }
 }
 
+unsafe fn confirm_delete_macro(window: Hwnd, name: &str) -> bool {
+    #[cfg(test)]
+    {
+        let _ = (window, name);
+        true
+    }
+    #[cfg(not(test))]
+    {
+        unsafe {
+            MessageBoxW(
+                window,
+                wide(&format!(
+                    "Hapus macro ‘{name}’? Tindakan ini permanen setelah disimpan."
+                ))
+                .as_ptr(),
+                wide("Hapus macro").as_ptr(),
+                MB_YESNO | MB_ICONWARNING,
+            ) == IDYES
+        }
+    }
+}
+
 unsafe fn handle_click(state: &mut AppState, target: HitTarget) {
     match target {
         HitTarget::None => {}
         HitTarget::TimerTab => unsafe { switch_tab(state, AppTab::Timer) },
         HitTarget::MacroTab => unsafe { switch_tab(state, AppTab::Macro) },
+        HitTarget::SettingsTab => unsafe { switch_tab(state, AppTab::Settings) },
         HitTarget::AddThirtyMinutes => unsafe { add_preset(state, 30 * 60) },
         HitTarget::AddOneHour => unsafe { add_preset(state, 60 * 60) },
         HitTarget::AddThreeHours => unsafe { add_preset(state, 3 * 60 * 60) },
@@ -4631,7 +5446,11 @@ unsafe fn handle_click(state: &mut AppState, target: HitTarget) {
             if !state.recording {
                 state.macro_selected_event = Some(index);
                 state.macro_status_kind = StatusKind::Ready;
-                state.macro_status = "Delay dipilih. Edit nilainya di panel kanan.".to_owned();
+                state.macro_status = if selected_delay(state).is_some() {
+                    "Delay dipilih. Edit nilainya atau atur urutan di panel kanan.".to_owned()
+                } else {
+                    "Langkah dipilih. Gunakan naik, turun, salin, atau hapus.".to_owned()
+                };
                 unsafe {
                     sync_delay_edit(state);
                     InvalidateRect(state.window, null(), FALSE);
@@ -4682,6 +5501,128 @@ unsafe fn handle_click(state: &mut AppState, target: HitTarget) {
                 unsafe { apply_delay_edit(state) };
             }
         }
+        HitTarget::MacroEventUp | HitTarget::MacroEventDown => {
+            if !state.recording {
+                let Some(index) = state.macro_selected_event else {
+                    return;
+                };
+                let direction = if target == HitTarget::MacroEventUp {
+                    -1
+                } else {
+                    1
+                };
+                let moved = selected_lane_mut(state)
+                    .and_then(|events| move_event(events, index, direction));
+                if let Some(next) = moved {
+                    state.macro_selected_event = Some(next);
+                    state.macro_dirty = true;
+                    state.macro_status_kind = StatusKind::Ready;
+                    state.macro_status = "Urutan langkah diperbarui.".to_owned();
+                } else {
+                    state.macro_status_kind = StatusKind::Warning;
+                    state.macro_status = "Langkah sudah berada di batas timeline.".to_owned();
+                }
+                unsafe {
+                    sync_delay_edit(state);
+                    InvalidateRect(state.window, null(), FALSE);
+                }
+            }
+        }
+        HitTarget::MacroEventDuplicate => {
+            if !state.recording {
+                let Some(index) = state.macro_selected_event else {
+                    return;
+                };
+                let duplicated =
+                    selected_lane_mut(state).and_then(|events| duplicate_event(events, index));
+                if let Some(next) = duplicated {
+                    state.macro_selected_event = Some(next);
+                    state.macro_dirty = true;
+                    state.macro_status_kind = StatusKind::Ready;
+                    state.macro_status = "Langkah disalin tepat setelah pilihan.".to_owned();
+                }
+                unsafe {
+                    sync_delay_edit(state);
+                    InvalidateRect(state.window, null(), FALSE);
+                }
+            }
+        }
+        HitTarget::MacroEventDelete => {
+            if !state.recording {
+                let Some(index) = state.macro_selected_event else {
+                    return;
+                };
+                let next = selected_lane_mut(state).and_then(|events| delete_event(events, index));
+                state.macro_selected_event = next;
+                state.macro_dirty = true;
+                state.macro_status_kind = StatusKind::Warning;
+                state.macro_status =
+                    "Langkah dihapus. Simpan untuk membuatnya permanen.".to_owned();
+                unsafe {
+                    sync_delay_edit(state);
+                    InvalidateRect(state.window, null(), FALSE);
+                }
+            }
+        }
+        HitTarget::MacroInsertDelay => {
+            if !state.recording {
+                let after = state.macro_selected_event;
+                let inserted =
+                    selected_lane_mut(state).and_then(|events| insert_delay(events, after, 100));
+                if let Some(index) = inserted {
+                    state.macro_selected_event = Some(index);
+                    state.macro_dirty = true;
+                    state.macro_status_kind = StatusKind::Ready;
+                    state.macro_status = "Delay 100 ms disisipkan dan siap diedit.".to_owned();
+                    unsafe {
+                        sync_delay_edit(state);
+                        InvalidateRect(state.window, null(), FALSE);
+                    }
+                }
+            }
+        }
+        HitTarget::MacroDuplicate => {
+            if !state.recording && state.macro_library.duplicate_selected().is_some() {
+                state.macro_lane = MacroLane::OnPress;
+                state.macro_selected_event = None;
+                state.macro_dirty = true;
+                state.macro_status_kind = StatusKind::Ready;
+                state.macro_status = "Macro disalin. Ubah nama lalu simpan.".to_owned();
+                unsafe {
+                    sync_macro_name_edit(state);
+                    sync_delay_edit(state);
+                    InvalidateRect(state.window, null(), FALSE);
+                }
+            }
+        }
+        HitTarget::MacroDelete => {
+            if !state.recording {
+                let selected = state
+                    .macro_library
+                    .selected()
+                    .map(|item| (item.id, item.name.clone()));
+                if let Some((id, name)) = selected
+                    && unsafe { confirm_delete_macro(state.window, &name) }
+                    && state.macro_library.delete_selected()
+                {
+                    state.macro_targets.remove(&id);
+                    state.macro_lane = MacroLane::OnPress;
+                    state.macro_selected_event = None;
+                    state.macro_dirty = true;
+                    state.macro_status_kind = StatusKind::Warning;
+                    state.macro_status = format!("{name} dihapus. Simpan untuk permanen.");
+                    unsafe {
+                        sync_macro_name_edit(state);
+                        sync_delay_edit(state);
+                        InvalidateRect(state.window, null(), FALSE);
+                    }
+                } else if state.macro_library.macros.len() <= 1 {
+                    state.macro_status_kind = StatusKind::Warning;
+                    state.macro_status = "Minimal satu macro harus tetap tersedia.".to_owned();
+                    unsafe { InvalidateRect(state.window, null(), FALSE) };
+                }
+            }
+        }
         HitTarget::MacroRecord => {
             if state.recording {
                 unsafe { stop_macro_recording(state) };
@@ -4710,6 +5651,66 @@ unsafe fn handle_click(state: &mut AppState, target: HitTarget) {
                 unsafe { save_current_macro(state) };
             }
         }
+        HitTarget::SettingMinimizeTray => {
+            state.settings.minimize_to_tray = !state.settings.minimize_to_tray;
+            unsafe { persist_settings(state, "Mode minimize-to-tray diperbarui.") };
+        }
+        HitTarget::SettingCloseTray => {
+            state.settings.close_to_tray = !state.settings.close_to_tray;
+            unsafe { persist_settings(state, "Perilaku tombol X diperbarui.") };
+        }
+        HitTarget::SettingAutoStart => {
+            let enabled = !state.settings.auto_start;
+            match unsafe { configure_auto_start(enabled) } {
+                Ok(()) => {
+                    state.settings.auto_start = enabled;
+                    unsafe {
+                        persist_settings(
+                            state,
+                            if enabled {
+                                "VibeTimer akan mulai di tray bersama Windows."
+                            } else {
+                                "Auto Start dinonaktifkan."
+                            },
+                        )
+                    };
+                }
+                Err(message) => {
+                    state.settings_status_kind = StatusKind::Error;
+                    state.settings_status = message;
+                    unsafe { InvalidateRect(state.window, null(), FALSE) };
+                }
+            }
+        }
+        HitTarget::SettingEmergencyHotkey(hotkey) => {
+            let previous = state.settings.emergency_hotkey;
+            state.settings.emergency_hotkey = hotkey;
+            match unsafe { register_emergency_hotkey(state) } {
+                Ok(()) => {
+                    unsafe { persist_settings(state, "Hotkey Emergency Stop diperbarui.") };
+                }
+                Err(message) => {
+                    state.settings.emergency_hotkey = previous;
+                    let _ = unsafe { register_emergency_hotkey(state) };
+                    state.settings_status_kind = StatusKind::Error;
+                    state.settings_status = message;
+                    unsafe { InvalidateRect(state.window, null(), FALSE) };
+                }
+            }
+        }
+        HitTarget::SettingEmergencyTimers => {
+            state.settings.emergency_stops_timers = !state.settings.emergency_stops_timers;
+            unsafe { persist_settings(state, "Cakupan Emergency Stop diperbarui.") };
+        }
+        HitTarget::SettingMaxRuntime(value) => {
+            state.settings.max_macro_runtime_seconds = value;
+            unsafe { persist_settings(state, "Batas durasi macro diperbarui.") };
+        }
+        HitTarget::SettingMaxRepeats(value) => {
+            state.settings.max_macro_repeats = value;
+            unsafe { persist_settings(state, "Batas pengulangan macro diperbarui.") };
+        }
+        HitTarget::SettingTestEmergency => unsafe { emergency_stop(state, "tombol Settings") },
     }
 }
 
@@ -4745,6 +5746,20 @@ unsafe extern "system" fn window_proc(
             unsafe {
                 initialize_controls(state, instance);
                 initialize_macro_hooks(state, instance);
+                if let Err(message) = add_tray_icon(state) {
+                    state.settings_status_kind = StatusKind::Error;
+                    state.settings_status = message;
+                }
+                if let Err(message) = register_emergency_hotkey(state) {
+                    state.settings_status_kind = StatusKind::Error;
+                    state.settings_status = message;
+                }
+                if state.settings.auto_start
+                    && let Err(message) = configure_auto_start(true)
+                {
+                    state.settings_status_kind = StatusKind::Warning;
+                    state.settings_status = message;
+                }
             }
             0
         }
@@ -4769,6 +5784,12 @@ unsafe extern "system" fn window_proc(
             0
         }
         WM_ERASEBKGND => 1,
+        WM_SIZE => {
+            if wparam == SIZE_MINIMIZED && state.settings.minimize_to_tray {
+                unsafe { ShowWindow(window, SW_HIDE) };
+            }
+            0
+        }
         WM_CTLCOLOREDIT | WM_CTLCOLORSTATIC => {
             let dc = wparam as Hdc;
             let panel_editor = lparam == state.macro_name_edit || lparam == state.macro_delay_edit;
@@ -4850,6 +5871,29 @@ unsafe extern "system" fn window_proc(
                 state.macro_dirty = true;
                 unsafe { InvalidateRect(window, null(), FALSE) };
             }
+            match wparam & 0xFFFF {
+                MENU_OPEN => unsafe { restore_from_tray(state) },
+                MENU_STOP_ALL => unsafe { emergency_stop(state, "menu tray") },
+                MENU_EXIT => {
+                    state.exit_requested = true;
+                    unsafe { PostMessageW(window, WM_CLOSE, 0, 0) };
+                }
+                _ => {}
+            }
+            0
+        }
+        WM_HOTKEY => {
+            if wparam as i32 == EMERGENCY_HOTKEY_ID {
+                unsafe { emergency_stop(state, "hotkey global") };
+            }
+            0
+        }
+        WM_APP_TRAY => {
+            match lparam as Uint {
+                WM_LBUTTONUP | WM_LBUTTONDOWN => unsafe { restore_from_tray(state) },
+                WM_RBUTTONUP => unsafe { show_tray_menu(state) },
+                _ => {}
+            }
             0
         }
         WM_APP_MACRO_DONE => {
@@ -4860,6 +5904,20 @@ unsafe extern "system" fn window_proc(
                 state.macro_status_kind = StatusKind::Error;
                 state.macro_status =
                     "Macro berhenti karena window target ditutup atau berubah.".to_owned();
+            } else if wparam == 3 {
+                state.macro_status_kind = StatusKind::Warning;
+                state.macro_status =
+                    "Macro berhenti otomatis setelah mencapai batas aman Settings.".to_owned();
+                unsafe {
+                    show_tray_notification(
+                        state,
+                        "Batas macro tercapai",
+                        "Macro dihentikan otomatis oleh batas durasi atau pengulangan.",
+                    )
+                };
+            } else if wparam == 4 {
+                state.macro_status_kind = StatusKind::Warning;
+                state.macro_status = "Macro dihentikan oleh Emergency Stop.".to_owned();
             } else {
                 state.macro_status_kind = StatusKind::Error;
                 state.macro_status =
@@ -4884,6 +5942,17 @@ unsafe extern "system" fn window_proc(
             0
         }
         WM_CLOSE => {
+            if state.settings.close_to_tray && !state.exit_requested {
+                unsafe {
+                    ShowWindow(window, SW_HIDE);
+                    show_tray_notification(
+                        state,
+                        "VibeTimer tetap aktif",
+                        "Timer dan macro tetap berjalan. Klik ikon tray untuk membuka kembali.",
+                    );
+                }
+                return 0;
+            }
             if state.recording {
                 unsafe { stop_macro_recording(state) };
             }
@@ -5026,7 +6095,15 @@ fn run() -> Result<(), String> {
         }
 
         let window = create_main_window(instance)?;
-        ShowWindow(window, SW_SHOWNORMAL);
+        let start_in_background = std::env::args_os().any(|argument| argument == "--background");
+        ShowWindow(
+            window,
+            if start_in_background {
+                SW_HIDE
+            } else {
+                SW_SHOWNORMAL
+            },
+        );
         UpdateWindow(window);
 
         let mut message: Msg = zeroed();
@@ -5066,6 +6143,18 @@ mod windows_e2e_tests {
 
     static BACKGROUND_KEY_DOWNS: AtomicUsize = AtomicUsize::new(0);
     static BACKGROUND_MOUSE_DOWNS: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn macro_safety_limits_are_enforced_and_can_be_disabled() {
+        let now = Instant::now();
+        assert!(playback_limit_check(now, 99, 0, 100).is_ok());
+        assert!(playback_limit_check(now, 100, 0, 100).is_err());
+        let old = now
+            .checked_sub(Duration::from_secs(2))
+            .expect("Instant dapat dikurangi");
+        assert!(playback_limit_check(old, 0, 1, 0).is_err());
+        assert!(playback_limit_check(old, u32::MAX, 0, 0).is_ok());
+    }
 
     unsafe extern "system" fn background_target_proc(
         window: Hwnd,
@@ -5292,8 +6381,9 @@ mod windows_e2e_tests {
             state.macro_library = MacroLibrary::default();
             sync_macro_name_edit(state);
 
-            assert_eq!(hit_test(340, 39, state), HitTarget::TimerTab);
-            assert_eq!(hit_test(430, 39, state), HitTarget::MacroTab);
+            assert_eq!(hit_test(287, 39, state), HitTarget::TimerTab);
+            assert_eq!(hit_test(361, 39, state), HitTarget::MacroTab);
+            assert_eq!(hit_test(448, 39, state), HitTarget::SettingsTab);
             assert_eq!(hit_test(100, 240, state), HitTarget::AddThirtyMinutes);
             assert_eq!(hit_test(210, 240, state), HitTarget::AddOneHour);
             assert_eq!(hit_test(330, 240, state), HitTarget::AddThreeHours);
@@ -5301,6 +6391,61 @@ mod windows_e2e_tests {
             assert_eq!(hit_test(145, 442, state), HitTarget::EnterOnly);
             assert_eq!(hit_test(350, 442, state), HitTarget::TextAndEnter);
             assert_eq!(hit_test(260, 575, state), HitTarget::MainAction);
+
+            switch_tab(state, AppTab::Settings);
+            assert_eq!(hit_test(210, 200, state), HitTarget::SettingMinimizeTray);
+            assert_eq!(hit_test(210, 260, state), HitTarget::SettingCloseTray);
+            assert_eq!(hit_test(210, 320, state), HitTarget::SettingAutoStart);
+            assert_eq!(
+                hit_test(600, 246, state),
+                HitTarget::SettingEmergencyHotkey(EmergencyHotkey::CtrlShiftF12)
+            );
+            handle_click(state, HitTarget::SettingMinimizeTray);
+            assert!(!state.settings.minimize_to_tray);
+            handle_click(state, HitTarget::SettingMinimizeTray);
+            assert!(state.settings.minimize_to_tray);
+            handle_click(state, HitTarget::SettingCloseTray);
+            assert!(!state.settings.close_to_tray);
+            handle_click(state, HitTarget::SettingCloseTray);
+            assert!(state.settings.close_to_tray);
+            handle_click(state, HitTarget::SettingAutoStart);
+            assert!(state.settings.auto_start);
+            assert!(TEST_AUTOSTART_ENABLED.load(Ordering::Acquire));
+            handle_click(state, HitTarget::SettingAutoStart);
+            assert!(!state.settings.auto_start);
+            assert!(!TEST_AUTOSTART_ENABLED.load(Ordering::Acquire));
+            handle_click(
+                state,
+                HitTarget::SettingEmergencyHotkey(EmergencyHotkey::CtrlShiftF12),
+            );
+            assert_eq!(
+                state.settings.emergency_hotkey,
+                EmergencyHotkey::CtrlShiftF12
+            );
+            handle_click(
+                state,
+                HitTarget::SettingEmergencyHotkey(EmergencyHotkey::CtrlAltF12),
+            );
+            handle_click(state, HitTarget::SettingEmergencyTimers);
+            assert!(!state.settings.emergency_stops_timers);
+            handle_click(state, HitTarget::SettingEmergencyTimers);
+            handle_click(state, HitTarget::SettingMaxRuntime(5 * 60));
+            handle_click(state, HitTarget::SettingMaxRepeats(100));
+            assert_eq!(state.settings.max_macro_runtime_seconds, 5 * 60);
+            assert_eq!(state.settings.max_macro_repeats, 100);
+            handle_click(state, HitTarget::SettingMaxRuntime(30 * 60));
+            handle_click(state, HitTarget::SettingMaxRepeats(10_000));
+            InvalidateRect(main_window, null(), FALSE);
+            UpdateWindow(main_window);
+            pump_messages_for(Duration::from_millis(120));
+            save_window_bmp(main_window, Path::new("qa/vibetimer-settings.bmp"))
+                .expect("snapshot Settings dibuat");
+            ShowWindow(main_window, SW_SHOWNORMAL);
+            SendMessageW(main_window, WM_SIZE, SIZE_MINIMIZED, 0);
+            assert_eq!(IsWindowVisible(main_window), FALSE);
+            restore_from_tray(state);
+            assert_ne!(IsWindowVisible(main_window), FALSE);
+            switch_tab(state, AppTab::Timer);
 
             set_duration_fields(state, DurationFields::new(0, 0, 0));
             handle_click(state, HitTarget::AddThirtyMinutes);
@@ -5434,6 +6579,11 @@ mod windows_e2e_tests {
             assert_eq!(hit_test(965, 410, state), HitTarget::MacroDelayMinus);
             assert_eq!(hit_test(1060, 410, state), HitTarget::MacroDelayPlus);
             assert_eq!(hit_test(1010, 460, state), HitTarget::MacroDelayApply);
+            assert_eq!(hit_test(975, 504, state), HitTarget::MacroEventUp);
+            assert_eq!(hit_test(1050, 504, state), HitTarget::MacroEventDown);
+            assert_eq!(hit_test(690, 570, state), HitTarget::MacroInsertDelay);
+            assert_eq!(hit_test(84, 568, state), HitTarget::MacroDuplicate);
+            assert_eq!(hit_test(176, 568, state), HitTarget::MacroDelete);
 
             handle_click(state, HitTarget::MacroNew);
             assert_eq!(state.macro_library.macros.len(), 2);
@@ -5597,6 +6747,49 @@ mod windows_e2e_tests {
                 None,
                 "edit per langkah harus mematikan override delay lama"
             );
+            handle_click(state, HitTarget::MacroEvent(1));
+            assert_eq!(state.macro_selected_event, Some(1));
+            handle_click(state, HitTarget::MacroEventDuplicate);
+            assert_eq!(
+                state
+                    .macro_library
+                    .selected()
+                    .expect("macro tersedia")
+                    .on_press
+                    .len(),
+                4
+            );
+            handle_click(state, HitTarget::MacroEventUp);
+            assert_eq!(state.macro_selected_event, Some(1));
+            handle_click(state, HitTarget::MacroEventDown);
+            assert_eq!(state.macro_selected_event, Some(2));
+            handle_click(state, HitTarget::MacroEventDelete);
+            assert_eq!(
+                state
+                    .macro_library
+                    .selected()
+                    .expect("macro tersedia")
+                    .on_press
+                    .len(),
+                3
+            );
+            handle_click(state, HitTarget::MacroInsertDelay);
+            assert_eq!(selected_delay(state), Some(100));
+            handle_click(state, HitTarget::MacroEventDelete);
+            assert_eq!(
+                state
+                    .macro_library
+                    .selected()
+                    .expect("macro tersedia")
+                    .on_press
+                    .len(),
+                3
+            );
+            handle_click(state, HitTarget::MacroDuplicate);
+            assert_eq!(state.macro_library.macros.len(), 3);
+            handle_click(state, HitTarget::MacroDelete);
+            assert_eq!(state.macro_library.macros.len(), 2);
+            handle_click(state, HitTarget::MacroItem(0));
             sync_macro_name_edit(state);
             InvalidateRect(main_window, null(), FALSE);
             UpdateWindow(main_window);
