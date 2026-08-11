@@ -5,9 +5,10 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 const MAGIC: &[u8; 4] = b"VTM1";
-const VERSION: u16 = 1;
+const VERSION: u16 = 2;
 const MAX_ITEMS: usize = 10_000;
 const MAX_NAME_BYTES: usize = 160;
+const MAX_TARGET_BYTES: usize = 520;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MacroMode {
@@ -80,7 +81,15 @@ pub enum MacroEvent {
     KeyUp(u16),
     MouseDown(MouseButton),
     MouseUp(MouseButton),
+    MouseDownAt(MouseButton, i32, i32),
+    MouseUpAt(MouseButton, i32, i32),
     Wheel(i16),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MacroTarget {
+    pub executable: String,
+    pub window_title: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,6 +100,7 @@ pub struct MacroDefinition {
     pub trigger: MacroTrigger,
     pub standard_delay_ms: Option<u32>,
     pub show_key_releases: bool,
+    pub target: Option<MacroTarget>,
     pub on_press: Vec<MacroEvent>,
     pub while_holding: Vec<MacroEvent>,
     pub on_release: Vec<MacroEvent>,
@@ -105,6 +115,7 @@ impl MacroDefinition {
             trigger: MacroTrigger::F8,
             standard_delay_ms: None,
             show_key_releases: true,
+            target: None,
             on_press: Vec::new(),
             while_holding: Vec::new(),
             on_release: Vec::new(),
@@ -215,6 +226,14 @@ pub fn encode_library(library: &MacroLibrary) -> io::Result<Vec<u8>> {
         out.push(trigger_to_byte(item.trigger));
         push_u32(&mut out, item.standard_delay_ms.unwrap_or(u32::MAX));
         out.push(u8::from(item.show_key_releases));
+        match &item.target {
+            Some(target) => {
+                out.push(1);
+                push_string(&mut out, &target.executable, MAX_TARGET_BYTES)?;
+                push_string(&mut out, &target.window_title, MAX_TARGET_BYTES)?;
+            }
+            None => out.push(0),
+        }
         encode_events(&mut out, &item.on_press)?;
         encode_events(&mut out, &item.while_holding)?;
         encode_events(&mut out, &item.on_release)?;
@@ -227,7 +246,8 @@ pub fn decode_library(bytes: &[u8]) -> Result<MacroLibrary, &'static str> {
     if reader.take(4)? != MAGIC {
         return Err("File macro bukan format VibeTimer.");
     }
-    if reader.u16()? != VERSION {
+    let version = reader.u16()?;
+    if !matches!(version, 1 | VERSION) {
         return Err("Versi file macro belum didukung.");
     }
     let selected_id = reader.u32()?;
@@ -254,6 +274,18 @@ pub fn decode_library(bytes: &[u8]) -> Result<MacroLibrary, &'static str> {
             1 => true,
             _ => return Err("Nilai pengaturan macro tidak valid."),
         };
+        let target = if version >= 2 {
+            match reader.u8()? {
+                0 => None,
+                1 => Some(MacroTarget {
+                    executable: reader.string(MAX_TARGET_BYTES)?,
+                    window_title: reader.string(MAX_TARGET_BYTES)?,
+                }),
+                _ => return Err("Nilai target macro tidak valid."),
+            }
+        } else {
+            None
+        };
         macros.push(MacroDefinition {
             id,
             name,
@@ -261,9 +293,10 @@ pub fn decode_library(bytes: &[u8]) -> Result<MacroLibrary, &'static str> {
             trigger,
             standard_delay_ms: (standard != u32::MAX).then_some(standard),
             show_key_releases,
-            on_press: decode_events(&mut reader)?,
-            while_holding: decode_events(&mut reader)?,
-            on_release: decode_events(&mut reader)?,
+            target,
+            on_press: decode_events(&mut reader, version)?,
+            while_holding: decode_events(&mut reader, version)?,
+            on_release: decode_events(&mut reader, version)?,
         });
     }
     if !reader.is_empty() {
@@ -325,12 +358,24 @@ fn encode_events(out: &mut Vec<u8>, events: &[MacroEvent]) -> io::Result<()> {
                 out.push(5);
                 push_u32(out, value as i32 as u32);
             }
+            MacroEvent::MouseDownAt(button, x, y) => {
+                out.push(6);
+                push_u32(out, mouse_to_byte(button) as u32);
+                push_u32(out, x as u32);
+                push_u32(out, y as u32);
+            }
+            MacroEvent::MouseUpAt(button, x, y) => {
+                out.push(7);
+                push_u32(out, mouse_to_byte(button) as u32);
+                push_u32(out, x as u32);
+                push_u32(out, y as u32);
+            }
         }
     }
     Ok(())
 }
 
-fn decode_events(reader: &mut Reader<'_>) -> Result<Vec<MacroEvent>, &'static str> {
+fn decode_events(reader: &mut Reader<'_>, version: u16) -> Result<Vec<MacroEvent>, &'static str> {
     let count = reader.u32()? as usize;
     if count > MAX_ITEMS {
         return Err("Jumlah langkah macro tidak valid.");
@@ -348,6 +393,16 @@ fn decode_events(reader: &mut Reader<'_>) -> Result<Vec<MacroEvent>, &'static st
             5 if (i16::MIN as i32..=i16::MAX as i32).contains(&(value as i32)) => {
                 MacroEvent::Wheel(value as i32 as i16)
             }
+            6 if version >= 2 && value <= u8::MAX as u32 => MacroEvent::MouseDownAt(
+                byte_to_mouse(value as u8)?,
+                reader.u32()? as i32,
+                reader.u32()? as i32,
+            ),
+            7 if version >= 2 && value <= u8::MAX as u32 => MacroEvent::MouseUpAt(
+                byte_to_mouse(value as u8)?,
+                reader.u32()? as i32,
+                reader.u32()? as i32,
+            ),
             _ => return Err("Jenis langkah macro tidak valid."),
         };
         events.push(event);
@@ -424,6 +479,19 @@ fn push_u32(out: &mut Vec<u8>, value: u32) {
     out.extend_from_slice(&value.to_le_bytes());
 }
 
+fn push_string(out: &mut Vec<u8>, value: &str, maximum: usize) -> io::Result<()> {
+    let bytes = value.as_bytes();
+    if bytes.len() > maximum || bytes.len() > u16::MAX as usize {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Teks target macro terlalu panjang.",
+        ));
+    }
+    push_u16(out, bytes.len() as u16);
+    out.extend_from_slice(bytes);
+    Ok(())
+}
+
 struct Reader<'a> {
     bytes: &'a [u8],
     position: usize,
@@ -461,6 +529,16 @@ impl<'a> Reader<'a> {
         Ok(u32::from_le_bytes(bytes))
     }
 
+    fn string(&mut self, maximum: usize) -> Result<String, &'static str> {
+        let length = self.u16()? as usize;
+        if length > maximum {
+            return Err("Teks target macro terlalu panjang.");
+        }
+        std::str::from_utf8(self.take(length)?)
+            .map(str::to_owned)
+            .map_err(|_| "Teks target macro bukan UTF-8 yang valid.")
+    }
+
     fn is_empty(&self) -> bool {
         self.position == self.bytes.len()
     }
@@ -479,12 +557,18 @@ mod tests {
         item.trigger = MacroTrigger::MouseX2;
         item.standard_delay_ms = Some(45);
         item.show_key_releases = false;
+        item.target = Some(MacroTarget {
+            executable: "game.exe".to_owned(),
+            window_title: "Game Window".to_owned(),
+        });
         item.on_press = vec![
             MacroEvent::KeyDown(0x41),
             MacroEvent::Delay(137),
             MacroEvent::KeyUp(0x41),
             MacroEvent::MouseDown(MouseButton::X1),
             MacroEvent::MouseUp(MouseButton::X1),
+            MacroEvent::MouseDownAt(MouseButton::Left, 320, 240),
+            MacroEvent::MouseUpAt(MouseButton::Left, 320, 240),
             MacroEvent::Wheel(-120),
         ];
         item.while_holding = vec![MacroEvent::Delay(20)];
@@ -501,6 +585,31 @@ mod tests {
             Err("File macro bukan format VibeTimer.")
         );
         assert_eq!(decode_library(b"VTM1\x01"), Err("File macro terpotong."));
+    }
+
+    #[test]
+    fn migrates_v1_library_without_a_window_target() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(MAGIC);
+        push_u16(&mut bytes, 1);
+        push_u32(&mut bytes, 1);
+        push_u32(&mut bytes, 2);
+        push_u32(&mut bytes, 1);
+        push_u32(&mut bytes, 1);
+        push_string(&mut bytes, "Macro lama", MAX_NAME_BYTES).unwrap();
+        bytes.push(mode_to_byte(MacroMode::NoRepeat));
+        bytes.push(trigger_to_byte(MacroTrigger::F8));
+        push_u32(&mut bytes, u32::MAX);
+        bytes.push(1);
+        encode_events(&mut bytes, &[MacroEvent::Delay(125)]).unwrap();
+        encode_events(&mut bytes, &[]).unwrap();
+        encode_events(&mut bytes, &[]).unwrap();
+
+        let migrated = decode_library(&bytes).expect("format V1 dimigrasikan");
+        let item = migrated.selected().expect("macro lama tersedia");
+        assert_eq!(item.name, "Macro lama");
+        assert_eq!(item.target, None);
+        assert_eq!(item.on_press, vec![MacroEvent::Delay(125)]);
     }
 
     #[test]

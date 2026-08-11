@@ -15,14 +15,19 @@ kanvas ivory, sementara acid-lime dibatasi untuk pilihan aktif, status, dan aksi
 utama. Timer dan Macro Editor tetap memiliki hierarki berbeda tanpa terasa
 seperti dua tema yang ditempel.
 
+Versi 0.3 menambahkan editor delay per langkah dan **Window Target**. Macro
+Toggle dapat terus berjalan pada satu game/aplikasi saat pengguna Alt+Tab,
+tanpa mengirim klik atau tombol ke aplikasi yang sedang dipakai.
+
 ## Kenapa Rust + Win32 native
 
 - Tidak memakai Electron, WebView2, Tauri, atau runtime tambahan.
 - Tidak memiliki dependency crate eksternal.
 - Satu executable native dengan penggunaan RAM rendah.
 - Teks dikirim sebagai Unicode melalui `SendInput`; clipboard pengguna tidak disentuh.
-- Recorder dan pemicu memakai low-level hook Win32; playback tetap melalui
-  `SendInput` native.
+- Recorder dan pemicu memakai low-level hook Win32. Playback global memakai
+  `SendInput`; playback Window Target memakai pesan window background tanpa
+  mengambil fokus.
 
 ## Alur penggunaan
 
@@ -41,14 +46,26 @@ aman dan tidak mengetik ke jendela lain.
 1. Buka tab **Macro**, lalu pilih **Buat macro baru** atau macro yang sudah ada.
 2. Pilih tipe: **No Repeat**, **While Holding**, **Toggle**, atau **Sequence**.
 3. Pasang pemicu global: `F8`, `F9`, `Middle`, `Mouse 4`, atau `Mouse 5`.
-4. Untuk Sequence, pilih lane **On Press**, **While Holding**, atau
+4. Pilih **Global** untuk mengikuti aplikasi aktif, atau **Window** lalu
+   **Pilih window** untuk mengikat macro ke satu aplikasi/game. Klik tepat pada
+   area yang harus menerima macro saat VibeTimer mengecil.
+5. Untuk Sequence, pilih lane **On Press**, **While Holding**, atau
    **On Release** sebelum merekam.
-5. Tekan **Rekam input**. Lakukan kombinasi keyboard/klik/scroll yang diinginkan,
+6. Tekan **Rekam input**. Lakukan kombinasi keyboard/klik/scroll yang diinginkan,
    lalu tekan `Esc` untuk selesai. Delay nyata serta key/button down dan up ikut
-   direkam.
-6. Tekan **Simpan**. Macro tersimpan di
+   direkam. Pada Window Target, posisi klik disimpan relatif terhadap window.
+7. Klik chip hijau `ms` untuk memilih delay. Isi angka `0—60000`, gunakan
+   tombol minus/plus untuk langkah 10 ms, lalu tekan **Terapkan ms**.
+8. Tekan **Simpan**. Macro tersimpan di
    `%LOCALAPPDATA%\VibeTimer\macros.vtm` dan pemicunya aktif selama VibeTimer
    berjalan.
+
+Untuk macro yang harus berjalan terus, pilih **Toggle**. Tekan pemicu sekali
+untuk mulai dan sekali lagi untuk berhenti. Jika Window Target aktif, loop tetap
+terkirim ke target saat kamu Alt+Tab; window lain tidak menerima input macro.
+Pemicu awal hanya aktif ketika target sedang di depan, sehingga tombol yang sama
+tetap normal di aplikasi lain. Setelah Toggle berjalan, pemicu kedua boleh
+ditekan dari aplikasi mana pun untuk menghentikannya.
 
 Saat recording, input keyboard dan mouse ditahan agar tidak ikut terkirim ke
 aplikasi lain. Hindari mengetik password atau data sensitif selama recorder
@@ -75,5 +92,13 @@ Executable hasil build berada di `target/release/VibeTimer.exe`.
   aksesibilitas tiap aplikasi AI berbeda. Input manual lebih dapat diprediksi.
 - Pemicu macro bekerja pada aplikasi dengan level privilege yang sama. Aplikasi
   Administrator dapat menolak input dari VibeTimer non-Administrator.
+- Window Target menggunakan pesan background Win32. Ini bekerja pada aplikasi
+  desktop, browser, dan game yang menerima window message, tetapi beberapa game
+  Raw Input/DirectInput atau anti-cheat dapat mengabaikannya. VibeTimer tidak
+  mencoba melewati proteksi tersebut.
+- Target dikenali kembali lewat nama executable + judul window. Jika judul game
+  berubah atau target memakai child window khusus, tekan **Ganti target**.
+- Macro lama otomatis dibaca dan dimigrasikan. Untuk klik background yang
+  presisi, pilih target lalu rekam ulang klik agar koordinat relatif tersimpan.
 - VibeTimer tidak dirancang untuk melewati anti-cheat, proteksi game, atau
   pembatasan keamanan aplikasi lain.
