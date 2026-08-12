@@ -8782,6 +8782,7 @@ mod windows_e2e_tests {
     }
 
     #[test]
+    #[ignore = "requires an interactive Windows desktop"]
     fn renders_and_sends_text_plus_enter_end_to_end() {
         unsafe {
             SetProcessDpiAwarenessContext(-5isize);

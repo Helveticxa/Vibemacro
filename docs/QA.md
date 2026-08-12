@@ -10,7 +10,8 @@ Platform: Windows x64, Rust 1.97.1, Inno Setup 7.0.2
 | `cargo fmt -- --check` | Lulus |
 | `cargo clippy --all-targets -- -D warnings` | Lulus, 0 warning |
 | Unit test | 33/33 lulus |
-| Windows E2E | 2/2 lulus |
+| Windows safety test | 1/1 lulus |
+| Windows desktop E2E (`--include-ignored`) | 1/1 lulus |
 | Total | 35/35 lulus |
 | Release build | Lulus |
 | Credential scan working tree + Git history | Lulus, tidak ada pola credential |
@@ -98,6 +99,11 @@ Cargo version, menjalankan credential scan dan seluruh build/test gate, lalu
 membuat GitHub Release dengan installer, portable EXE, manifest tetap, dan
 checksums. Asset live dan endpoint `/releases/latest/download/` harus diverifikasi
 lagi setelah tag 1.1.0 dipublikasikan.
+
+GitHub-hosted runner bersifat headless, sehingga test `SendInput`/focus desktop
+ditandai `ignored` pada CI namun wajib dan sudah dijalankan lokal dengan
+`--include-ignored`. CI tetap mengompilasi test tersebut dan menjalankan seluruh
+unit test serta safety-limit test noninteraktif.
 
 ## Risiko tersisa
 

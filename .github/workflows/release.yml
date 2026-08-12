@@ -35,7 +35,9 @@ jobs:
 
       - name: Test and build release assets
         shell: pwsh
-        run: .\tools\build-release.ps1
+        # GitHub-hosted Windows runners tidak memiliki desktop interaktif untuk
+        # SendInput/focus E2E. Test tersebut wajib dijalankan lokal sebelum tag.
+        run: .\tools\build-release.ps1 -SkipDesktopE2E
 
       - name: Publish verified GitHub Release
         shell: pwsh

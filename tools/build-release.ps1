@@ -1,6 +1,7 @@
 param(
     [string]$IsccPath = '',
-    [switch]$SkipValidation
+    [switch]$SkipValidation,
+    [switch]$SkipDesktopE2E
 )
 
 $ErrorActionPreference = 'Stop'
@@ -16,7 +17,11 @@ try {
         if ($LASTEXITCODE -ne 0) { throw 'cargo fmt gagal' }
         cargo clippy --all-targets -- -D warnings
         if ($LASTEXITCODE -ne 0) { throw 'cargo clippy gagal' }
-        cargo test --all-targets -- --test-threads=1
+        if ($SkipDesktopE2E) {
+            cargo test --all-targets -- --test-threads=1
+        } else {
+            cargo test --all-targets -- --include-ignored --test-threads=1
+        }
         if ($LASTEXITCODE -ne 0) { throw 'cargo test gagal' }
     }
     cargo build --release

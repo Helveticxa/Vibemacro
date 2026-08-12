@@ -116,12 +116,14 @@ git clone https://github.com/Helveticxa/Vibemacro.git
 cd Vibemacro
 cargo fmt -- --check
 cargo clippy --all-targets -- -D warnings
-cargo test --all-targets -- --test-threads=1
+cargo test --all-targets -- --include-ignored --test-threads=1
 .\tools\security-scan.ps1 -IncludeHistory
 .\tools\build-release.ps1
 ```
 
 Artefak lokal dibuat di `dist/`. Tidak ada dependency crate/runtime eksternal.
+Test desktop bertanda `ignored` agar runner GitHub headless tidak memberikan
+false failure; `--include-ignored` di atas wajib dipakai pada Windows interaktif.
 
 ## Security dan privacy
 

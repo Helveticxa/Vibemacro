@@ -8,7 +8,7 @@ request kecil yang fokus pada satu perubahan.
 ```powershell
 cargo fmt -- --check
 cargo clippy --all-targets -- -D warnings
-cargo test --all-targets -- --test-threads=1
+cargo test --all-targets -- --include-ignored --test-threads=1
 .\tools\security-scan.ps1 -IncludeHistory
 ```
 
