@@ -66,6 +66,31 @@ mencegah runtime lama dan baru berjalan bersamaan.
 Manifest menunjuk asset release versi spesifik dan hash installer identik dengan
 `SHA256SUMS.txt`.
 
+Artefak lokal di atas dibangun dengan Inno Setup 7.0.2. GitHub membangun ulang
+dari commit/tag yang sama memakai runner `windows-2022` dan Inno Setup 6.7.1,
+sehingga hash PE publik berbeda dan dicatat terpisah di bawah.
+
+## GitHub Release live
+
+- Repository: `Helveticxa/Vibemacro`, public, default branch `main`, MIT.
+- CI commit `51b7d2e`: success.
+- Release workflow `v1.1.0`: success pada seluruh langkah.
+- Release: `Vibemacro 1.1.0`, draft `false`, prerelease `false`.
+- Endpoint tetap `/releases/latest/download/vibemacro-update.txt` dapat diunduh
+  tanpa autentikasi dan mengarah ke installer versi 1.1.0.
+
+| Asset publik | Ukuran | SHA-256 GitHub |
+|---|---:|---|
+| `Vibemacro-Setup-1.1.0-x64.exe` | 2.449.657 byte | `7801248F24A24777A6F3B2DD952A02B42B0B9138FD5846B71CF2B49D63D2BE67` |
+| `Vibemacro-1.1.0-portable.exe` | 391.168 byte | `572B60C56BB19127F94A6B1E8465FE65D613301A2C7497F533A7D860B62F31E5` |
+| `vibemacro-update.txt` | 210 byte | `92B7D14156A4B539EA26F57BAF8C430CC3EA84DA37A1FF6BB3D5CB41E2D9BD10` |
+| `SHA256SUMS.txt` | 278 byte | `D9C803D0B7D505FAF0B8F13C83411ED2D32463AD8A718EEEA4C139FA4BB7E269` |
+
+Installer diunduh ulang melalui URL pada manifest. Hash aktual sama persis
+dengan hash manifest. Isi `SHA256SUMS.txt` juga cocok untuk installer, portable,
+dan manifest. Defender scan pada installer dan portable hasil download live:
+exit 0, `found no threats`. Salinan QA unduhan kemudian dihapus.
+
 ## Malware dan secret scope
 
 - Microsoft Defender custom scan pada installer dan portable EXE: exit 0,
@@ -97,8 +122,8 @@ universal bahwa software tidak mungkin memiliki kerentanan.
 Workflow release dipicu hanya oleh tag `v*.*.*`, memverifikasi tag sama dengan
 Cargo version, menjalankan credential scan dan seluruh build/test gate, lalu
 membuat GitHub Release dengan installer, portable EXE, manifest tetap, dan
-checksums. Asset live dan endpoint `/releases/latest/download/` harus diverifikasi
-lagi setelah tag 1.1.0 dipublikasikan.
+checksums. Asset live dan endpoint `/releases/latest/download/` sudah diverifikasi
+setelah tag 1.1.0 dipublikasikan.
 
 GitHub-hosted runner bersifat headless, sehingga test `SendInput`/focus desktop
 ditandai `ignored` pada CI namun wajib dan sudah dijalankan lokal dengan
