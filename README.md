@@ -25,7 +25,7 @@ saat ini belum memiliki sertifikat Authenticode. Selalu unduh dari repository
 ini dan cocokkan SHA-256 dengan `SHA256SUMS.txt` pada release yang sama:
 
 ```powershell
-Get-FileHash .\Vibemacro-Setup-1.1.0-x64.exe -Algorithm SHA256
+Get-FileHash .\Vibemacro-Setup-1.2.0-x64.exe -Algorithm SHA256
 ```
 
 Versi portable `Vibemacro-<versi>-portable.exe` juga tersedia, tetapi installer
@@ -40,7 +40,11 @@ direkomendasikan agar upgrade, shortcut, dan uninstall berjalan konsisten.
   **While Holding**, **Toggle**, dan **Sequence**.
 - Timeline editor untuk delay `0-60000 ms`, reorder, duplicate, insert, delete.
 - Trigger `F8`, `F9`, `Middle`, `Mouse 4`, dan `Mouse 5`.
-- Window Target: macro tetap menuju aplikasi yang dipilih saat pengguna Alt+Tab.
+- Tiga scope output: **Global**, **App** background, dan **Game** focus-lock.
+- Mode Game memakai keyboard scan code dan mouse input Windows agar lebih cocok
+  untuk game yang mengabaikan pesan window biasa.
+- Exact-instance lock, auto-pause saat Alt+Tab, serta release/resume tombol dan
+  klik yang sedang ditahan agar input tidak menumpuk ke aplikasi lain.
 - App Profiles dan backup portable `.vtb`.
 - Tray Mode, Auto Start, serta Emergency Stop global.
 - Batas durasi/repeat agar loop tidak berjalan tanpa kendali.
@@ -61,13 +65,28 @@ menjadi **Missed** dan tidak pernah mengetik diam-diam ketika Vibemacro dibuka.
 ## Menggunakan Macro Studio
 
 1. Buat macro, pilih perilaku dan trigger.
-2. Pilih scope **Global** atau **Window**.
+2. Pilih scope **Global**, **App**, atau **Game**.
 3. Tekan **Rekam input**, jalankan urutan input, lalu tekan `Esc`.
 4. Edit delay/urutan event dan tekan **Simpan**.
 
-Untuk Window Target, event dikirim ke window yang sudah diverifikasi tanpa
-merebut fokus. Sebagian game Raw Input/DirectInput atau anti-cheat dapat menolak
-window message; Vibemacro tidak mencoba melewati proteksi tersebut.
+Gunakan **App** untuk aplikasi desktop Win32 yang menerima pesan keyboard/mouse
+di background. Gunakan **Game** untuk Roblox atau game yang membaca input lewat
+jalur perangkat: target harus menjadi foreground ketika menerima input. Saat
+Alt+Tab, Vibemacro melepas tombol/klik yang masih down dan mem-pause playback;
+ketika kembali ke instance yang sama playback dilanjutkan. Input tidak dialihkan
+ke window lain. Jika ada beberapa instance dengan executable dan judul identik,
+Vibemacro gagal aman dan meminta target dipilih ulang.
+
+Mode Game mengikuti fokus internal game seperti keyboard fisik. Jika chat Roblox
+sedang aktif, WASD tetap akan masuk ke chat; tutup chat/klik viewport gameplay
+sebelum memicu macro. Vibemacro tidak membaca atau memodifikasi state internal
+game untuk membedakan chat dari kontrol karakter.
+
+Windows tidak menyediakan mouse virtual per-window melalui `SendInput`; cursor
+dan input stream tetap resource desktop bersama. Karena itu mode Game tidak
+berpura-pura menjalankan input di Roblox background. Vibemacro juga tidak
+memasang driver virtual, menginjeksi proses game, atau melewati anti-cheat.
+Periksa aturan game/experience sebelum menggunakan automation.
 
 Emergency Stop default adalah `Ctrl + Alt + F12`. Jangan mengetik password atau
 data sensitif ketika recorder sedang aktif.

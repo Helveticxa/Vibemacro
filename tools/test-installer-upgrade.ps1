@@ -4,6 +4,10 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $project = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+$cargoToml = Get-Content -LiteralPath (Join-Path $project 'Cargo.toml') -Raw
+$versionMatch = [regex]::Match($cargoToml, '(?m)^version\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"')
+if (-not $versionMatch.Success) { throw 'Versi package tidak ditemukan di Cargo.toml' }
+$version = $versionMatch.Groups[1].Value
 $qaParent = [System.IO.Path]::GetFullPath((Join-Path $project 'qa'))
 $qaRoot = [System.IO.Path]::GetFullPath((Join-Path $qaParent 'installer-upgrade'))
 $fixtureDir = Join-Path $qaRoot 'fixtures'
@@ -48,17 +52,17 @@ $previousLocalAppData = $env:LOCALAPPDATA
 try {
     & $IsccPath "/DMyAppId=$qaAppId" "/DMyOutputDir=$fixtureDir" (Join-Path $project 'installer\LegacyUpgradeFixture.iss') | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'Legacy fixture gagal dibuat' }
-    & $IsccPath "/DMyAppId=$qaAppId" "/DMyOutputDir=$fixtureDir" '/DMyOutputBaseFilename=Vibemacro-Setup-1.1.0-QA' (Join-Path $project 'installer\Vibemacro.iss') | Out-Null
+    & $IsccPath "/DMyAppId=$qaAppId" "/DMyOutputDir=$fixtureDir" "/DMyOutputBaseFilename=Vibemacro-Setup-$version-QA" (Join-Path $project 'installer\Vibemacro.iss') | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'Vibemacro QA installer gagal dibuat' }
 
     $oldInstaller = Join-Path $fixtureDir 'VibeTimer-Setup-1.0.0-QA.exe'
-    $newInstaller = Join-Path $fixtureDir 'Vibemacro-Setup-1.1.0-QA.exe'
+    $newInstaller = Join-Path $fixtureDir "Vibemacro-Setup-$version-QA.exe"
     $oldSetup = Start-Process -FilePath $oldInstaller -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',"/DIR=$installDir" -WindowStyle Hidden -PassThru -Wait
     if ($oldSetup.ExitCode -ne 0) { throw "Install 1.0 QA gagal: $($oldSetup.ExitCode)" }
     $oldExePresent = Test-Path -LiteralPath (Join-Path $installDir 'VibeTimer.exe')
 
     $newSetup = Start-Process -FilePath $newInstaller -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',"/DIR=$installDir" -WindowStyle Hidden -PassThru -Wait
-    if ($newSetup.ExitCode -ne 0) { throw "Upgrade 1.1 QA gagal: $($newSetup.ExitCode)" }
+    if ($newSetup.ExitCode -ne 0) { throw "Upgrade $version QA gagal: $($newSetup.ExitCode)" }
     $newExe = Join-Path $installDir 'Vibemacro.exe'
     $newExePresent = Test-Path -LiteralPath $newExe
     $oldExeRemoved = -not (Test-Path -LiteralPath (Join-Path $installDir 'VibeTimer.exe'))

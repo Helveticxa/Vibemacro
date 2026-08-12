@@ -53,4 +53,4 @@ jobs:
             --verify-tag `
             --latest `
             --title "Vibemacro $version" `
-            --notes-file ".\docs\RELEASE-v1.1.md"
+            --notes-file ".\docs\RELEASE-v1.2.md"

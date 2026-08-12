@@ -1,5 +1,5 @@
 #define MyAppName "Vibemacro"
-#define MyAppVersion "1.1.0"
+#define MyAppVersion "1.2.0"
 #define MyAppPublisher "Helveticxa"
 #define MyAppExeName "Vibemacro.exe"
 #ifndef MyAppId
@@ -9,7 +9,7 @@
   #define MyOutputDir "..\dist"
 #endif
 #ifndef MyOutputBaseFilename
-  #define MyOutputBaseFilename "Vibemacro-Setup-1.1.0-x64"
+  #define MyOutputBaseFilename "Vibemacro-Setup-1.2.0-x64"
 #endif
 
 [Setup]
@@ -39,7 +39,7 @@ CloseApplications=yes
 RestartApplications=no
 AppMutex=Local\VibeTimer.SingleInstance.v1
 SetupLogging=yes
-VersionInfoVersion=1.1.0.0
+VersionInfoVersion=1.2.0.0
 VersionInfoCompany={#MyAppPublisher}
 VersionInfoDescription=Installer {#MyAppName}
 VersionInfoProductName={#MyAppName}

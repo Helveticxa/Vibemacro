@@ -11,7 +11,7 @@ use crate::settings::{read_with_backup_recovery, save_atomic};
 use std::fs;
 
 const MAGIC: &[u8; 4] = b"VTM1";
-const VERSION: u16 = 2;
+const VERSION: u16 = 3;
 const MAX_ITEMS: usize = 10_000;
 const MAX_MACROS: usize = 6;
 const MAX_NAME_BYTES: usize = 160;
@@ -81,6 +81,22 @@ pub enum MouseButton {
     X2,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MacroTargetMode {
+    #[default]
+    Background,
+    ForegroundExclusive,
+}
+
+impl MacroTargetMode {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Background => "App BG",
+            Self::ForegroundExclusive => "Game",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MacroEvent {
     Delay(u32),
@@ -108,6 +124,7 @@ pub struct MacroDefinition {
     pub standard_delay_ms: Option<u32>,
     pub show_key_releases: bool,
     pub target: Option<MacroTarget>,
+    pub target_mode: MacroTargetMode,
     pub on_press: Vec<MacroEvent>,
     pub while_holding: Vec<MacroEvent>,
     pub on_release: Vec<MacroEvent>,
@@ -123,6 +140,7 @@ impl MacroDefinition {
             standard_delay_ms: None,
             show_key_releases: true,
             target: None,
+            target_mode: MacroTargetMode::Background,
             on_press: Vec::new(),
             while_holding: Vec::new(),
             on_release: Vec::new(),
@@ -332,6 +350,10 @@ pub fn encode_library(library: &MacroLibrary) -> io::Result<Vec<u8>> {
             }
             None => out.push(0),
         }
+        out.push(match item.target_mode {
+            MacroTargetMode::Background => 0,
+            MacroTargetMode::ForegroundExclusive => 1,
+        });
         encode_events(&mut out, &item.on_press)?;
         encode_events(&mut out, &item.while_holding)?;
         encode_events(&mut out, &item.on_release)?;
@@ -345,7 +367,7 @@ pub fn decode_library(bytes: &[u8]) -> Result<MacroLibrary, &'static str> {
         return Err("File macro bukan format Vibemacro/VibeTimer.");
     }
     let version = reader.u16()?;
-    if !matches!(version, 1 | VERSION) {
+    if !matches!(version, 1 | 2 | VERSION) {
         return Err("Versi file macro belum didukung.");
     }
     let selected_id = reader.u32()?;
@@ -392,6 +414,15 @@ pub fn decode_library(bytes: &[u8]) -> Result<MacroLibrary, &'static str> {
         }) {
             return Err("Target macro tidak lengkap.");
         }
+        let target_mode = if version >= 3 {
+            match reader.u8()? {
+                0 => MacroTargetMode::Background,
+                1 => MacroTargetMode::ForegroundExclusive,
+                _ => return Err("Mode target macro tidak valid."),
+            }
+        } else {
+            MacroTargetMode::Background
+        };
         if standard != u32::MAX && standard > 60_000 {
             return Err("Standard delay macro melewati batas 60000 ms.");
         }
@@ -403,6 +434,7 @@ pub fn decode_library(bytes: &[u8]) -> Result<MacroLibrary, &'static str> {
             standard_delay_ms: (standard != u32::MAX).then_some(standard),
             show_key_releases,
             target,
+            target_mode,
             on_press: decode_events(&mut reader, version)?,
             while_holding: decode_events(&mut reader, version)?,
             on_release: decode_events(&mut reader, version)?,
@@ -686,6 +718,7 @@ mod tests {
             executable: "game.exe".to_owned(),
             window_title: "Game Window".to_owned(),
         });
+        item.target_mode = MacroTargetMode::ForegroundExclusive;
         item.on_press = vec![
             MacroEvent::KeyDown(0x41),
             MacroEvent::Delay(137),
@@ -735,6 +768,33 @@ mod tests {
         assert_eq!(item.name, "Macro lama");
         assert_eq!(item.target, None);
         assert_eq!(item.on_press, vec![MacroEvent::Delay(125)]);
+    }
+
+    #[test]
+    fn migrates_v2_window_target_to_background_mode() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(MAGIC);
+        push_u16(&mut bytes, 2);
+        push_u32(&mut bytes, 1);
+        push_u32(&mut bytes, 2);
+        push_u32(&mut bytes, 1);
+        push_u32(&mut bytes, 1);
+        push_string(&mut bytes, "Macro v2", MAX_NAME_BYTES).unwrap();
+        bytes.push(mode_to_byte(MacroMode::Toggle));
+        bytes.push(trigger_to_byte(MacroTrigger::F9));
+        push_u32(&mut bytes, 25);
+        bytes.push(1);
+        bytes.push(1);
+        push_string(&mut bytes, "game.exe", MAX_TARGET_BYTES).unwrap();
+        push_string(&mut bytes, "Game Window", MAX_TARGET_BYTES).unwrap();
+        encode_events(&mut bytes, &[MacroEvent::KeyDown(0x57)]).unwrap();
+        encode_events(&mut bytes, &[]).unwrap();
+        encode_events(&mut bytes, &[MacroEvent::KeyUp(0x57)]).unwrap();
+
+        let decoded = decode_library(&bytes).unwrap();
+        let item = decoded.selected().unwrap();
+        assert_eq!(item.target_mode, MacroTargetMode::Background);
+        assert_eq!(item.target.as_ref().unwrap().executable, "game.exe");
     }
 
     #[test]

@@ -14,9 +14,9 @@ use std::sync::atomic::{AtomicIsize, AtomicUsize};
 
 use vibemacro_core::backup::{BackupBundle, load_backup, save_backup};
 use vibemacro_core::macro_engine::{
-    MacroDefinition, MacroEvent, MacroLibrary, MacroMode, MacroTarget, MacroTrigger, MouseButton,
-    default_data_path, delete_event, duplicate_event, insert_delay, load_library, move_event,
-    save_library,
+    MacroDefinition, MacroEvent, MacroLibrary, MacroMode, MacroTarget, MacroTargetMode,
+    MacroTrigger, MouseButton, default_data_path, delete_event, duplicate_event, insert_delay,
+    load_library, move_event, save_library,
 };
 use vibemacro_core::profiles::{
     ProfileLibrary, default_profiles_path, load_profiles, save_profiles,
@@ -148,6 +148,8 @@ const INPUT_KEYBOARD: Dword = 1;
 const INPUT_MOUSE: Dword = 0;
 const KEYEVENTF_KEYUP: Dword = 0x0002;
 const KEYEVENTF_UNICODE: Dword = 0x0004;
+const KEYEVENTF_SCANCODE: Dword = 0x0008;
+const KEYEVENTF_EXTENDEDKEY: Dword = 0x0001;
 const MOUSEEVENTF_LEFTDOWN: Dword = 0x0002;
 const MOUSEEVENTF_LEFTUP: Dword = 0x0004;
 const MOUSEEVENTF_RIGHTDOWN: Dword = 0x0008;
@@ -874,6 +876,7 @@ enum HitTarget {
     MacroEvent(usize),
     MacroScopeGlobal,
     MacroScopeTarget,
+    MacroScopeGame,
     MacroTargetPick,
     MacroDelayMinus,
     MacroDelayPlus,
@@ -929,7 +932,8 @@ struct MacroPlaybackTarget {
 #[derive(Clone)]
 enum PlaybackDestination {
     Foreground,
-    Window(MacroPlaybackTarget),
+    BackgroundWindow(MacroPlaybackTarget),
+    ForegroundExclusive(MacroPlaybackTarget),
 }
 
 #[derive(Default)]
@@ -996,6 +1000,7 @@ struct AppState {
     macro_lane: MacroLane,
     macro_selected_event: Option<usize>,
     macro_targets: HashMap<u32, MacroPlaybackTarget>,
+    pending_macro_target_mode: Option<MacroTargetMode>,
     recording: bool,
     record_last_event: Option<Instant>,
     suppress_escape_until_up: bool,
@@ -1142,6 +1147,7 @@ impl AppState {
             macro_lane: MacroLane::OnPress,
             macro_selected_event: None,
             macro_targets: HashMap::new(),
+            pending_macro_target_mode: None,
             recording: false,
             record_last_event: None,
             suppress_escape_until_up: false,
@@ -1293,8 +1299,9 @@ const RECT_MACRO_LANE_RELEASE: Rect = Rect::new(578, 331, 722, 365);
 const RECT_MACRO_RECORD: Rect = Rect::new(278, 548, 474, 596);
 const RECT_MACRO_CLEAR: Rect = Rect::new(484, 548, 634, 596);
 const RECT_MACRO_SAVE: Rect = Rect::new(758, 548, 912, 596);
-const RECT_MACRO_SCOPE_GLOBAL: Rect = Rect::new(946, 169, 1008, 205);
-const RECT_MACRO_SCOPE_TARGET: Rect = Rect::new(1016, 169, 1080, 205);
+const RECT_MACRO_SCOPE_GLOBAL: Rect = Rect::new(946, 169, 998, 205);
+const RECT_MACRO_SCOPE_TARGET: Rect = Rect::new(1002, 169, 1036, 205);
+const RECT_MACRO_SCOPE_GAME: Rect = Rect::new(1040, 169, 1080, 205);
 const RECT_MACRO_TARGET_PICK: Rect = Rect::new(946, 216, 1080, 256);
 const RECT_MACRO_DELAY_MINUS: Rect = Rect::new(946, 393, 982, 429);
 const RECT_MACRO_DELAY_PLUS: Rect = Rect::new(1044, 393, 1080, 429);
@@ -1532,6 +1539,9 @@ fn hit_test(x: i32, y: i32, state: &AppState) -> HitTarget {
         }
         if RECT_MACRO_SCOPE_TARGET.contains(x, y) {
             return HitTarget::MacroScopeTarget;
+        }
+        if RECT_MACRO_SCOPE_GAME.contains(x, y) {
+            return HitTarget::MacroScopeGame;
         }
         if RECT_MACRO_TARGET_PICK.contains(x, y) {
             return HitTarget::MacroTargetPick;
@@ -2887,6 +2897,8 @@ unsafe fn draw_macro_interface_v3(dc: Hdc, state: &AppState) {
             DT_LEFT | DT_VCENTER | DT_SINGLELINE,
         );
         let window_scoped = item.target.is_some();
+        let background_scoped = window_scoped && item.target_mode == MacroTargetMode::Background;
+        let game_scoped = window_scoped && item.target_mode == MacroTargetMode::ForegroundExclusive;
         for (rect, label, active, target) in [
             (
                 RECT_MACRO_SCOPE_GLOBAL,
@@ -2896,9 +2908,15 @@ unsafe fn draw_macro_interface_v3(dc: Hdc, state: &AppState) {
             ),
             (
                 RECT_MACRO_SCOPE_TARGET,
-                "Window",
-                window_scoped,
+                "App",
+                background_scoped,
                 HitTarget::MacroScopeTarget,
+            ),
+            (
+                RECT_MACRO_SCOPE_GAME,
+                "Game",
+                game_scoped,
+                HitTarget::MacroScopeGame,
             ),
         ] {
             draw_flat_button(
@@ -2943,8 +2961,10 @@ unsafe fn draw_macro_interface_v3(dc: Hdc, state: &AppState) {
         );
         draw_label(
             dc,
-            if window_scoped {
-                "Alt+Tab tetap aman"
+            if game_scoped {
+                "Alt+Tab: pause aman"
+            } else if background_scoped {
+                "Background Win32"
             } else {
                 "Mengikuti app aktif"
             },
@@ -5254,6 +5274,7 @@ unsafe fn process_executable_name(process_id: Dword) -> Result<String, String> {
 struct MacroTargetSearch<'a> {
     specification: &'a MacroTarget,
     found: Hwnd,
+    matches: u32,
 }
 
 unsafe extern "system" fn find_macro_target_callback(window: Hwnd, lparam: Lparam) -> Bool {
@@ -5272,8 +5293,11 @@ unsafe extern "system" fn find_macro_target_callback(window: Hwnd, lparam: Lpara
         .as_deref()
         .is_ok_and(|value| value.eq_ignore_ascii_case(&search.specification.executable))
     {
-        search.found = window;
-        FALSE
+        search.matches = search.matches.saturating_add(1);
+        if search.found == 0 {
+            search.found = window;
+        }
+        if search.matches > 1 { FALSE } else { TRUE }
     } else {
         TRUE
     }
@@ -5285,6 +5309,7 @@ unsafe fn find_saved_macro_target(
     let mut search = MacroTargetSearch {
         specification,
         found: 0,
+        matches: 0,
     };
     unsafe {
         EnumWindows(
@@ -5295,6 +5320,12 @@ unsafe fn find_saved_macro_target(
     if search.found == 0 {
         return Err(format!(
             "Target {} belum terbuka. Buka aplikasinya atau pilih ulang window.",
+            specification.executable
+        ));
+    }
+    if search.matches > 1 {
+        return Err(format!(
+            "Ada beberapa instance {} dengan judul sama. Pilih ulang instance yang tepat.",
             specification.executable
         ));
     }
@@ -5331,15 +5362,23 @@ unsafe fn resolve_playback_destination(
     let Some(specification) = item.target.as_ref() else {
         return Ok(PlaybackDestination::Foreground);
     };
-    if let Some(target) = state.macro_targets.get(&item.id)
-        && unsafe { validate_macro_playback_target(target) }.is_ok()
-    {
-        return Ok(PlaybackDestination::Window(target.clone()));
+    if let Some(target) = state.macro_targets.get(&item.id) {
+        unsafe { validate_macro_playback_target(target) }.map_err(|_| {
+            "Instance target sudah ditutup atau berubah. Pilih ulang target; macro tidak dialihkan ke instance lain.".to_owned()
+        })?;
+        return Ok(match item.target_mode {
+            MacroTargetMode::Background => PlaybackDestination::BackgroundWindow(target.clone()),
+            MacroTargetMode::ForegroundExclusive => {
+                PlaybackDestination::ForegroundExclusive(target.clone())
+            }
+        });
     }
-    state.macro_targets.remove(&item.id);
     let target = unsafe { find_saved_macro_target(specification) }?;
     state.macro_targets.insert(item.id, target.clone());
-    Ok(PlaybackDestination::Window(target))
+    Ok(match item.target_mode {
+        MacroTargetMode::Background => PlaybackDestination::BackgroundWindow(target),
+        MacroTargetMode::ForegroundExclusive => PlaybackDestination::ForegroundExclusive(target),
+    })
 }
 
 unsafe fn read_number(window: Hwnd) -> u32 {
@@ -5436,11 +5475,18 @@ unsafe fn begin_target_capture(state: &mut AppState) {
     }
 }
 
-unsafe fn begin_macro_target_capture(state: &mut AppState) {
+unsafe fn begin_macro_target_capture(state: &mut AppState, mode: MacroTargetMode) {
     if state.recording || state.macro_library.selected().is_none() {
         return;
     }
-    let instruction = "Setelah menekan OK, Vibemacro mengecil selama 3 detik.\n\nKlik tepat pada area game atau aplikasi yang harus menerima macro. Posisi klik saat recording akan disimpan relatif ke window ini.";
+    let instruction = match mode {
+        MacroTargetMode::Background => {
+            "Setelah menekan OK, Vibemacro mengecil selama 3 detik.\n\nKlik area aplikasi Win32 yang harus menerima macro background. Posisi klik saat recording akan disimpan relatif ke window ini."
+        }
+        MacroTargetMode::ForegroundExclusive => {
+            "Setelah menekan OK, Vibemacro mengecil selama 3 detik.\n\nKlik instance game yang akan dikunci. Input hanya dikirim saat instance ini aktif; Alt+Tab melepas tombol lalu mem-pause macro."
+        }
+    };
     let response = unsafe {
         MessageBoxW(
             state.window,
@@ -5452,6 +5498,7 @@ unsafe fn begin_macro_target_capture(state: &mut AppState) {
     if response != IDOK {
         return;
     }
+    state.pending_macro_target_mode = Some(mode);
     state.capture_kind = CaptureKind::Macro;
     state.capture_deadline = Some(Instant::now() + Duration::from_secs(3));
     state.macro_status_kind = StatusKind::Warning;
@@ -5494,6 +5541,10 @@ unsafe fn finish_macro_target_capture(state: &mut AppState) {
     unsafe {
         KillTimer(state.window, TIMER_CAPTURE);
         state.capture_deadline = None;
+        let target_mode = state
+            .pending_macro_target_mode
+            .take()
+            .unwrap_or(MacroTargetMode::Background);
         let mut cursor = Point::default();
         let has_cursor = GetCursorPos(&mut cursor) != FALSE;
         let pointed_window = if has_cursor {
@@ -5502,7 +5553,9 @@ unsafe fn finish_macro_target_capture(state: &mut AppState) {
             0
         };
         let root = GetForegroundWindow();
-        let receiver = if pointed_window != 0 && GetAncestor(pointed_window, GA_ROOT) == root {
+        let receiver = if target_mode == MacroTargetMode::ForegroundExclusive {
+            root
+        } else if pointed_window != 0 && GetAncestor(pointed_window, GA_ROOT) == root {
             pointed_window
         } else {
             root
@@ -5547,6 +5600,7 @@ unsafe fn finish_macro_target_capture(state: &mut AppState) {
                 executable: executable.clone(),
                 window_title: title.clone(),
             });
+            item.target_mode = target_mode;
         }
         state.macro_targets.insert(
             selected_id,
@@ -5559,10 +5613,14 @@ unsafe fn finish_macro_target_capture(state: &mut AppState) {
         );
         state.macro_dirty = true;
         state.macro_status_kind = StatusKind::Ready;
-        state.macro_status = format!(
-            "Target {} dipasang. Toggle tetap berjalan saat Alt+Tab.",
-            executable
-        );
+        state.macro_status = match target_mode {
+            MacroTargetMode::Background => {
+                format!("Target {executable} dipasang dalam mode App background.")
+            }
+            MacroTargetMode::ForegroundExclusive => {
+                format!("Instance {executable} dikunci. Macro pause aman saat Alt+Tab.")
+            }
+        };
         InvalidateRect(state.window, null(), FALSE);
     }
 }
@@ -5777,6 +5835,48 @@ fn macro_event_input(event: &MacroEvent) -> Option<Input> {
             Some(mouse_input(data, flags))
         }
         MacroEvent::Wheel(delta) => Some(mouse_input(delta as i32 as Dword, MOUSEEVENTF_WHEEL)),
+    }
+}
+
+fn extended_virtual_key(key: u16) -> bool {
+    matches!(
+        key,
+        0x21 | 0x22
+            | 0x23
+            | 0x24
+            | 0x25
+            | 0x26
+            | 0x27
+            | 0x28
+            | 0x2D
+            | 0x2E
+            | 0x5B
+            | 0x5C
+            | 0x6F
+            | 0x90
+            | 0x91
+            | 0xA3
+            | 0xA5
+    )
+}
+
+unsafe fn game_macro_event_input(event: &MacroEvent) -> Option<Input> {
+    match *event {
+        MacroEvent::KeyDown(key) | MacroEvent::KeyUp(key) => {
+            let scan = unsafe { MapVirtualKeyW(key as Uint, MAPVK_VK_TO_VSC) } as u16;
+            if scan == 0 {
+                return macro_event_input(event);
+            }
+            let mut flags = KEYEVENTF_SCANCODE;
+            if extended_virtual_key(key) {
+                flags |= KEYEVENTF_EXTENDEDKEY;
+            }
+            if matches!(event, MacroEvent::KeyUp(_)) {
+                flags |= KEYEVENTF_KEYUP;
+            }
+            Some(keyboard_input(0, scan, flags))
+        }
+        _ => macro_event_input(event),
     }
 }
 
@@ -6497,10 +6597,18 @@ fn apply_selected_profile_target_to_linked_macros(state: &mut AppState) {
         return;
     };
     let linked = profile.macro_ids.clone();
+    let runtime_target = state
+        .profile_targets
+        .get(&state.profile_library.selected_id)
+        .cloned();
     for item in &mut state.macro_library.macros {
         if linked.contains(&item.id) {
             item.target = Some(target.clone());
-            state.macro_targets.remove(&item.id);
+            if let Some(runtime_target) = &runtime_target {
+                state.macro_targets.insert(item.id, runtime_target.clone());
+            } else {
+                state.macro_targets.remove(&item.id);
+            }
         }
     }
 }
@@ -6623,11 +6731,13 @@ unsafe fn save_current_macro(state: &mut AppState) {
             state.macro_status = format!(
                 "Macro tersimpan • {} • {}.",
                 item.map(|item| item.trigger.label()).unwrap_or("-"),
-                if item.is_some_and(|item| item.target.is_some()) {
-                    "khusus window target"
-                } else {
-                    "aktif global"
-                }
+                item.map_or("aktif global", |item| {
+                    match (&item.target, item.target_mode) {
+                        (None, _) => "aktif global",
+                        (Some(_), MacroTargetMode::Background) => "App background",
+                        (Some(_), MacroTargetMode::ForegroundExclusive) => "Game focus-lock",
+                    }
+                })
             );
         }
         Err(error) => {
@@ -6672,8 +6782,12 @@ unsafe fn start_macro_recording(state: &mut AppState) {
         PlaybackDestination::Foreground => {
             "Merekam input global. Tekan Esc untuk selesai.".to_owned()
         }
-        PlaybackDestination::Window(target) => format!(
+        PlaybackDestination::BackgroundWindow(target) => format!(
             "Merekam posisi relatif untuk {}. Tekan Esc untuk selesai.",
+            target.title
+        ),
+        PlaybackDestination::ForegroundExclusive(target) => format!(
+            "Merekam untuk instance game {}. Tekan Esc untuk selesai.",
             target.title
         ),
     };
@@ -6691,11 +6805,10 @@ unsafe fn recorded_mouse_event(
     screen_point: Point,
 ) -> MacroEvent {
     let selected_id = state.macro_library.selected_id;
-    let window_scoped = state
-        .macro_library
-        .selected()
-        .is_some_and(|item| item.target.is_some());
-    if window_scoped && let Some(target) = state.macro_targets.get(&selected_id) {
+    let background_scoped = state.macro_library.selected().is_some_and(|item| {
+        item.target.is_some() && item.target_mode == MacroTargetMode::Background
+    });
+    if background_scoped && let Some(target) = state.macro_targets.get(&selected_id) {
         let mut client_point = screen_point;
         if unsafe { ScreenToClient(target.receiver, &mut client_point) } != FALSE {
             return if down {
@@ -6775,20 +6888,179 @@ fn sleep_interruptible(milliseconds: u32) -> bool {
     true
 }
 
+#[derive(Default)]
+struct HeldMacroInputs {
+    keys: Vec<u16>,
+    buttons: Vec<MouseButton>,
+    exclusive_suspended: bool,
+}
+
+impl HeldMacroInputs {
+    fn observe(&mut self, event: &MacroEvent) {
+        match *event {
+            MacroEvent::KeyDown(key) => {
+                if !self.keys.contains(&key) {
+                    self.keys.push(key);
+                }
+            }
+            MacroEvent::KeyUp(key) => self.keys.retain(|held| *held != key),
+            MacroEvent::MouseDown(button) | MacroEvent::MouseDownAt(button, _, _) => {
+                if !self.buttons.contains(&button) {
+                    self.buttons.push(button);
+                }
+            }
+            MacroEvent::MouseUp(button) | MacroEvent::MouseUpAt(button, _, _) => {
+                self.buttons.retain(|held| *held != button);
+            }
+            MacroEvent::Delay(_) | MacroEvent::Wheel(_) => {}
+        }
+    }
+
+    fn synthetic_events(&self, down: bool) -> Vec<MacroEvent> {
+        let mut events = Vec::with_capacity(self.keys.len() + self.buttons.len());
+        for key in &self.keys {
+            events.push(if down {
+                MacroEvent::KeyDown(*key)
+            } else {
+                MacroEvent::KeyUp(*key)
+            });
+        }
+        for button in &self.buttons {
+            events.push(if down {
+                MacroEvent::MouseDown(*button)
+            } else {
+                MacroEvent::MouseUp(*button)
+            });
+        }
+        events
+    }
+
+    fn clear(&mut self) {
+        self.keys.clear();
+        self.buttons.clear();
+        self.exclusive_suspended = false;
+    }
+}
+
+unsafe fn exact_target_is_foreground(target: &MacroPlaybackTarget) -> Result<bool, String> {
+    unsafe { validate_macro_playback_target(target) }?;
+    let foreground = unsafe { GetForegroundWindow() };
+    #[cfg(test)]
+    let foreground = if foreground == 0 {
+        unsafe { GetActiveWindow() }
+    } else {
+        foreground
+    };
+    Ok(foreground != 0 && unsafe { GetAncestor(foreground, GA_ROOT) } == target.root)
+}
+
+unsafe fn submit_held_game_inputs(held: &HeldMacroInputs, down: bool) -> Result<(), String> {
+    let inputs: Vec<Input> = held
+        .synthetic_events(down)
+        .iter()
+        .filter_map(|event| unsafe { game_macro_event_input(event) })
+        .collect();
+    unsafe { submit_inputs(&inputs) }
+}
+
+fn wait_for_exclusive_target(
+    target: &MacroPlaybackTarget,
+    held: &mut HeldMacroInputs,
+) -> Result<bool, String> {
+    loop {
+        if MACRO_STOP.load(Ordering::Acquire) {
+            return Ok(false);
+        }
+        if unsafe { exact_target_is_foreground(target) }? {
+            if held.exclusive_suspended {
+                unsafe { submit_held_game_inputs(held, true) }?;
+                held.exclusive_suspended = false;
+            }
+            return Ok(true);
+        }
+        if !held.exclusive_suspended {
+            unsafe { submit_held_game_inputs(held, false) }?;
+            held.exclusive_suspended = true;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn playback_sleep(
+    milliseconds: u32,
+    destination: &PlaybackDestination,
+    held: &mut HeldMacroInputs,
+) -> Result<bool, String> {
+    let mut remaining = milliseconds;
+    while remaining > 0 {
+        if MACRO_STOP.load(Ordering::Acquire) {
+            return Ok(false);
+        }
+        if let PlaybackDestination::ForegroundExclusive(target) = destination
+            && !wait_for_exclusive_target(target, held)?
+        {
+            return Ok(false);
+        }
+        let slice = remaining.min(10);
+        thread::sleep(Duration::from_millis(slice as u64));
+        remaining -= slice;
+    }
+    Ok(true)
+}
+
+fn cleanup_held_inputs(
+    destination: &PlaybackDestination,
+    held: &mut HeldMacroInputs,
+) -> Result<(), String> {
+    if held.keys.is_empty() && held.buttons.is_empty() {
+        held.clear();
+        return Ok(());
+    }
+    let events = held.synthetic_events(false);
+    let result = match destination {
+        PlaybackDestination::Foreground => {
+            let inputs: Vec<Input> = events.iter().filter_map(macro_event_input).collect();
+            unsafe { submit_inputs(&inputs) }
+        }
+        PlaybackDestination::BackgroundWindow(target) => {
+            for event in &events {
+                unsafe { post_background_event(target, event) }?;
+            }
+            Ok(())
+        }
+        PlaybackDestination::ForegroundExclusive(_) if held.exclusive_suspended => Ok(()),
+        PlaybackDestination::ForegroundExclusive(_) => {
+            let inputs: Vec<Input> = events
+                .iter()
+                .filter_map(|event| unsafe { game_macro_event_input(event) })
+                .collect();
+            unsafe { submit_inputs(&inputs) }
+        }
+    };
+    held.clear();
+    result
+}
+
 fn play_macro_events(
     events: &[MacroEvent],
     standard_delay: Option<u32>,
     destination: &PlaybackDestination,
+    held: &mut HeldMacroInputs,
 ) -> Result<bool, String> {
     for event in events {
         if MACRO_STOP.load(Ordering::Acquire) {
             return Ok(false);
         }
         if let MacroEvent::Delay(recorded) = event {
-            if !sleep_interruptible(standard_delay.unwrap_or(*recorded)) {
+            if !playback_sleep(standard_delay.unwrap_or(*recorded), destination, held)? {
                 return Ok(false);
             }
             continue;
+        }
+        if let PlaybackDestination::ForegroundExclusive(target) = destination
+            && !wait_for_exclusive_target(target, held)?
+        {
+            return Ok(false);
         }
         #[cfg(test)]
         TEST_MACRO_INPUT_COUNT.fetch_add(1, Ordering::Relaxed);
@@ -6796,11 +7068,19 @@ fn play_macro_events(
             PlaybackDestination::Foreground => {
                 if let Some(input) = macro_event_input(event) {
                     unsafe { submit_inputs(&[input])? };
+                    held.observe(event);
                 }
             }
-            PlaybackDestination::Window(target) => unsafe {
+            PlaybackDestination::BackgroundWindow(target) => unsafe {
                 post_background_event(target, event)?;
+                held.observe(event);
             },
+            PlaybackDestination::ForegroundExclusive(_) => {
+                if let Some(input) = unsafe { game_macro_event_input(event) } {
+                    unsafe { submit_inputs(&[input])? };
+                    held.observe(event);
+                }
+            }
         }
     }
     Ok(true)
@@ -6854,6 +7134,46 @@ fn playback_limit_check(
     Ok(())
 }
 
+#[cfg(test)]
+mod game_scope_unit_tests {
+    use super::*;
+
+    #[test]
+    fn held_inputs_release_and_resume_without_stacking() {
+        let mut held = HeldMacroInputs::default();
+        held.observe(&MacroEvent::KeyDown(0x57));
+        held.observe(&MacroEvent::MouseDown(MouseButton::Left));
+        held.observe(&MacroEvent::KeyDown(0x57));
+        assert_eq!(
+            held.synthetic_events(false),
+            vec![
+                MacroEvent::KeyUp(0x57),
+                MacroEvent::MouseUp(MouseButton::Left),
+            ]
+        );
+        held.observe(&MacroEvent::KeyUp(0x57));
+        held.observe(&MacroEvent::MouseUp(MouseButton::Left));
+        assert!(held.synthetic_events(false).is_empty());
+    }
+
+    #[test]
+    fn game_keyboard_uses_scan_codes_for_wasd() {
+        let down = unsafe { game_macro_event_input(&MacroEvent::KeyDown(0x57)) }
+            .expect("W menghasilkan input");
+        let down_keyboard = unsafe { down.data.keyboard };
+        assert_eq!(down_keyboard.virtual_key, 0);
+        assert_ne!(down_keyboard.scan_code, 0);
+        assert_ne!(down_keyboard.flags & KEYEVENTF_SCANCODE, 0);
+        assert_eq!(down_keyboard.flags & KEYEVENTF_KEYUP, 0);
+
+        let up = unsafe { game_macro_event_input(&MacroEvent::KeyUp(0x57)) }
+            .expect("W up menghasilkan input");
+        let up_keyboard = unsafe { up.data.keyboard };
+        assert_ne!(up_keyboard.flags & KEYEVENTF_SCANCODE, 0);
+        assert_ne!(up_keyboard.flags & KEYEVENTF_KEYUP, 0);
+    }
+}
+
 fn launch_macro_playback(
     window: Hwnd,
     item: MacroDefinition,
@@ -6885,17 +7205,18 @@ fn launch_macro_playback(
         let standard = item.standard_delay_ms;
         let started = Instant::now();
         let mut repeats = 0u32;
-        let result = (|| -> Result<(), String> {
+        let mut held = HeldMacroInputs::default();
+        let mut result = (|| -> Result<(), String> {
             match item.mode {
                 MacroMode::NoRepeat => {
-                    play_macro_events(&item.on_press, standard, &destination)?;
+                    play_macro_events(&item.on_press, standard, &destination, &mut held)?;
                 }
                 MacroMode::RepeatWhileHolding => {
                     while TRIGGER_HELD.load(Ordering::Acquire)
                         && !MACRO_STOP.load(Ordering::Acquire)
                     {
                         playback_limit_check(started, repeats, max_runtime_seconds, max_repeats)?;
-                        if !play_macro_events(&item.on_press, standard, &destination)? {
+                        if !play_macro_events(&item.on_press, standard, &destination, &mut held)? {
                             break;
                         }
                         repeats = repeats.saturating_add(1);
@@ -6907,7 +7228,7 @@ fn launch_macro_playback(
                 MacroMode::Toggle => {
                     while !MACRO_STOP.load(Ordering::Acquire) {
                         playback_limit_check(started, repeats, max_runtime_seconds, max_repeats)?;
-                        if !play_macro_events(&item.on_press, standard, &destination)? {
+                        if !play_macro_events(&item.on_press, standard, &destination, &mut held)? {
                             break;
                         }
                         repeats = repeats.saturating_add(1);
@@ -6917,7 +7238,7 @@ fn launch_macro_playback(
                     }
                 }
                 MacroMode::Sequence => {
-                    if play_macro_events(&item.on_press, standard, &destination)? {
+                    if play_macro_events(&item.on_press, standard, &destination, &mut held)? {
                         while TRIGGER_HELD.load(Ordering::Acquire)
                             && !MACRO_STOP.load(Ordering::Acquire)
                         {
@@ -6927,7 +7248,12 @@ fn launch_macro_playback(
                                 max_runtime_seconds,
                                 max_repeats,
                             )?;
-                            if !play_macro_events(&item.while_holding, standard, &destination)? {
+                            if !play_macro_events(
+                                &item.while_holding,
+                                standard,
+                                &destination,
+                                &mut held,
+                            )? {
                                 break;
                             }
                             repeats = repeats.saturating_add(1);
@@ -6936,13 +7262,18 @@ fn launch_macro_playback(
                             }
                         }
                         if !MACRO_STOP.load(Ordering::Acquire) {
-                            play_macro_events(&item.on_release, standard, &destination)?;
+                            play_macro_events(&item.on_release, standard, &destination, &mut held)?;
                         }
                     }
                 }
             }
             Ok(())
         })();
+        if let Err(cleanup_error) = cleanup_held_inputs(&destination, &mut held)
+            && result.is_ok()
+        {
+            result = Err(cleanup_error);
+        }
         post_macro_result(window, result);
     });
 }
@@ -7078,8 +7409,14 @@ unsafe fn handle_trigger_down(state: &mut AppState, item: MacroDefinition) {
     state.macro_status_kind = StatusKind::Running;
     state.macro_status = match &destination {
         PlaybackDestination::Foreground => format!("Menjalankan {}…", item.name),
-        PlaybackDestination::Window(target) => {
-            format!("{} berjalan di {} • Alt+Tab aman", item.name, target.title)
+        PlaybackDestination::BackgroundWindow(target) => {
+            format!("{} berjalan background di {}", item.name, target.title)
+        }
+        PlaybackDestination::ForegroundExclusive(target) => {
+            format!(
+                "{} aktif di {} - pause saat Alt+Tab",
+                item.name, target.title
+            )
         }
     };
     unsafe { InvalidateRect(state.window, null(), FALSE) };
@@ -7607,6 +7944,7 @@ unsafe fn handle_click(state: &mut AppState, target: HitTarget) {
                 let selected_id = state.macro_library.selected_id;
                 if let Some(item) = state.macro_library.selected_mut() {
                     item.target = None;
+                    item.target_mode = MacroTargetMode::Background;
                 }
                 state.macro_targets.remove(&selected_id);
                 state.macro_dirty = true;
@@ -7617,18 +7955,46 @@ unsafe fn handle_click(state: &mut AppState, target: HitTarget) {
             }
         }
         HitTarget::MacroScopeTarget => {
-            if !state.recording
-                && state
-                    .macro_library
-                    .selected()
-                    .is_some_and(|item| item.target.is_none())
-            {
-                unsafe { begin_macro_target_capture(state) };
+            if !state.recording {
+                if let Some(item) = state.macro_library.selected_mut()
+                    && item.target.is_some()
+                {
+                    item.target_mode = MacroTargetMode::Background;
+                    state.macro_dirty = true;
+                    state.macro_status_kind = StatusKind::Ready;
+                    state.macro_status =
+                        "Mode App memakai pesan background untuk aplikasi Win32.".to_owned();
+                    unsafe { InvalidateRect(state.window, null(), FALSE) };
+                } else {
+                    unsafe { begin_macro_target_capture(state, MacroTargetMode::Background) };
+                }
+            }
+        }
+        HitTarget::MacroScopeGame => {
+            if !state.recording {
+                if let Some(item) = state.macro_library.selected_mut()
+                    && item.target.is_some()
+                {
+                    item.target_mode = MacroTargetMode::ForegroundExclusive;
+                    state.macro_dirty = true;
+                    state.macro_status_kind = StatusKind::Ready;
+                    state.macro_status = "Mode Game aktif: input hanya ke instance target saat foreground; Alt+Tab akan pause.".to_owned();
+                    unsafe { InvalidateRect(state.window, null(), FALSE) };
+                } else {
+                    unsafe {
+                        begin_macro_target_capture(state, MacroTargetMode::ForegroundExclusive)
+                    };
+                }
             }
         }
         HitTarget::MacroTargetPick => {
             if !state.recording {
-                unsafe { begin_macro_target_capture(state) };
+                let mode = state
+                    .macro_library
+                    .selected()
+                    .map(|item| item.target_mode)
+                    .unwrap_or(MacroTargetMode::Background);
+                unsafe { begin_macro_target_capture(state, mode) };
             }
         }
         HitTarget::MacroDelayMinus => {
@@ -7994,7 +8360,15 @@ unsafe fn handle_click(state: &mut AppState, target: HitTarget) {
                     .find(|item| item.id == macro_id)
             {
                 item.target = Some(target_specification);
-                state.macro_targets.remove(&macro_id);
+                if let Some(runtime_target) = state
+                    .profile_targets
+                    .get(&state.profile_library.selected_id)
+                    .cloned()
+                {
+                    state.macro_targets.insert(macro_id, runtime_target);
+                } else {
+                    state.macro_targets.remove(&macro_id);
+                }
             }
             state.profile_dirty = true;
             state.macro_dirty = true;
@@ -8686,13 +9060,17 @@ mod windows_e2e_tests {
     }
 
     unsafe fn wait_macro_idle() {
-        let deadline = Instant::now() + Duration::from_secs(2);
+        // GUI scheduling on a busy Windows runner can delay the playback worker.
+        // Keep this bounded, but leave enough room that the test measures the
+        // final state instead of the scheduler's latency.
+        let deadline = Instant::now() + Duration::from_secs(5);
         while MACRO_PLAYING.load(Ordering::Acquire) && Instant::now() < deadline {
             unsafe { pump_messages_for(Duration::from_millis(20)) };
         }
         assert!(
             !MACRO_PLAYING.load(Ordering::Acquire),
-            "playback macro harus kembali idle"
+            "playback macro {} harus kembali idle",
+            MACRO_PLAYING_ID.load(Ordering::Acquire)
         );
     }
 
@@ -9146,6 +9524,10 @@ mod windows_e2e_tests {
             SetWindowTextW(state.prompt_edit, wide("lanjutkan").as_ptr());
             state.action_mode = ActionMode::TextAndEnter;
             TEST_INPUT_TARGET.store(target_edit, Ordering::Relaxed);
+            SetForegroundWindow(target_window);
+            SetActiveWindow(target_window);
+            SetFocus(target_edit);
+            pump_messages_for(Duration::from_millis(80));
             begin_timer(state);
             assert!(state.running);
             pump_messages_for(Duration::from_millis(120));
@@ -9264,7 +9646,8 @@ mod windows_e2e_tests {
             assert_eq!(hit_test(550, 570, state), HitTarget::MacroClear);
             assert_eq!(hit_test(835, 570, state), HitTarget::MacroSave);
             assert_eq!(hit_test(975, 185, state), HitTarget::MacroScopeGlobal);
-            assert_eq!(hit_test(1050, 185, state), HitTarget::MacroScopeTarget);
+            assert_eq!(hit_test(1010, 185, state), HitTarget::MacroScopeTarget);
+            assert_eq!(hit_test(1055, 185, state), HitTarget::MacroScopeGame);
             assert_eq!(hit_test(1010, 235, state), HitTarget::MacroTargetPick);
             assert_eq!(hit_test(965, 410, state), HitTarget::MacroDelayMinus);
             assert_eq!(hit_test(1060, 410, state), HitTarget::MacroDelayPlus);
@@ -9890,6 +10273,62 @@ mod windows_e2e_tests {
                     "playback target tidak boleh mengubah foreground window"
                 );
             }
+            keyboard_hook_proc(HC_ACTION, WM_KEYDOWN as Wparam, &f9 as *const _ as Lparam);
+            keyboard_hook_proc(HC_ACTION, WM_KEYUP as Wparam, &f9 as *const _ as Lparam);
+            wait_macro_idle();
+
+            let item = state
+                .macro_library
+                .selected_mut()
+                .expect("macro Game tersedia");
+            item.target_mode = MacroTargetMode::ForegroundExclusive;
+            item.on_press = vec![
+                MacroEvent::KeyDown(0x57),
+                MacroEvent::Delay(35),
+                MacroEvent::KeyUp(0x57),
+                MacroEvent::MouseDown(MouseButton::Left),
+                MacroEvent::Delay(20),
+                MacroEvent::MouseUp(MouseButton::Left),
+            ];
+            state.macro_dirty = true;
+            handle_click(state, HitTarget::MacroSave);
+            let game_saved = load_library(&e2e_macro_path).expect("macro Game dibaca ulang");
+            assert_eq!(
+                game_saved
+                    .selected()
+                    .expect("macro Game tersimpan")
+                    .target_mode,
+                MacroTargetMode::ForegroundExclusive
+            );
+            InvalidateRect(main_window, null(), FALSE);
+            UpdateWindow(main_window);
+            pump_messages_for(Duration::from_millis(80));
+            save_window_bmp(main_window, Path::new("qa/vibemacro-game-scope.bmp"))
+                .expect("snapshot mode Game dibuat");
+
+            SetForegroundWindow(background_window);
+            SetActiveWindow(background_window);
+            BringWindowToTop(background_window);
+            pump_messages_for(Duration::from_millis(50));
+            keyboard_hook_proc(HC_ACTION, WM_KEYDOWN as Wparam, &f9 as *const _ as Lparam);
+            keyboard_hook_proc(HC_ACTION, WM_KEYUP as Wparam, &f9 as *const _ as Lparam);
+            pump_messages_for(Duration::from_millis(100));
+            assert!(MACRO_PLAYING.load(Ordering::Acquire));
+            SetForegroundWindow(other_window);
+            SetActiveWindow(other_window);
+            BringWindowToTop(other_window);
+            pump_messages_for(Duration::from_millis(80));
+            let paused_input_count = TEST_MACRO_INPUT_COUNT.load(Ordering::Relaxed);
+            pump_messages_for(Duration::from_millis(180));
+            assert_eq!(
+                TEST_MACRO_INPUT_COUNT.load(Ordering::Relaxed),
+                paused_input_count,
+                "mode Game tidak boleh mengirim input ketika instance target bukan foreground"
+            );
+            assert!(
+                MACRO_PLAYING.load(Ordering::Acquire),
+                "Toggle Game harus pause, bukan berpindah ke window lain"
+            );
             keyboard_hook_proc(HC_ACTION, WM_KEYDOWN as Wparam, &f9 as *const _ as Lparam);
             keyboard_hook_proc(HC_ACTION, WM_KEYUP as Wparam, &f9 as *const _ as Lparam);
             wait_macro_idle();
