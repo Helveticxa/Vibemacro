@@ -1,0 +1,54 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Verify tag matches Cargo version
+        shell: pwsh
+        run: |
+          $cargo = Get-Content -LiteralPath .\Cargo.toml -Raw
+          $match = [regex]::Match($cargo, '(?m)^version\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"')
+          if (-not $match.Success) { throw 'Cargo version tidak ditemukan' }
+          $expected = "v$($match.Groups[1].Value)"
+          if ($env:GITHUB_REF_NAME -ne $expected) {
+            throw "Tag $env:GITHUB_REF_NAME tidak cocok dengan $expected"
+          }
+
+      - name: Scan repository for leaked credentials
+        shell: pwsh
+        run: .\tools\security-scan.ps1 -IncludeHistory
+
+      - name: Test and build release assets
+        shell: pwsh
+        run: .\tools\build-release.ps1
+
+      - name: Publish verified GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          gh release create $env:GITHUB_REF_NAME `
+            ".\dist\Vibemacro-Setup-$version-x64.exe" `
+            ".\dist\Vibemacro-$version-portable.exe" `
+            ".\dist\vibemacro-update.txt" `
+            ".\dist\SHA256SUMS.txt" `
+            --verify-tag `
+            --latest `
+            --title "Vibemacro $version" `
+            --notes-file ".\docs\RELEASE-v1.1.md"

@@ -85,7 +85,7 @@ pub fn encode_backup(bundle: &BackupBundle) -> io::Result<Vec<u8>> {
 pub fn decode_backup(bytes: &[u8]) -> Result<BackupBundle, &'static str> {
     let mut reader = Reader::new(bytes);
     if reader.take(4)? != MAGIC {
-        return Err("File bukan backup VibeTimer.");
+        return Err("File bukan backup Vibemacro/VibeTimer.");
     }
     if reader.u16()? != VERSION {
         return Err("Versi backup belum didukung.");

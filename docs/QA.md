@@ -1,107 +1,108 @@
-# VibeTimer 1.0 — QA Evidence
+# Vibemacro 1.1.0 - QA Evidence
 
-Tanggal verifikasi: 12 Agustus 2026
+Tanggal verifikasi lokal: 2026-08-12
 Platform: Windows x64, Rust 1.97.1, Inno Setup 7.0.2
 
-## Status gerbang final
+## Source gate
 
 | Pemeriksaan | Hasil |
 |---|---|
 | `cargo fmt -- --check` | Lulus |
 | `cargo clippy --all-targets -- -D warnings` | Lulus, 0 warning |
-| `cargo test --all-targets -- --test-threads=1` | Lulus, 31 unit + 2 Windows E2E |
-| `cargo build --release` | Lulus |
-| Dependency runtime eksternal | Tidak ada |
-| Install → launch → uninstall | Lulus |
-| Microsoft Defender custom scan | Tidak ada threat pada EXE dan installer |
-| Authenticode artefak VibeTimer | `NotSigned` |
+| Unit test | 33/33 lulus |
+| Windows E2E | 2/2 lulus |
+| Total | 35/35 lulus |
+| Release build | Lulus |
+| Credential scan working tree + Git history | Lulus, tidak ada pola credential |
+| Dependency runtime pihak ketiga | Tidak ada |
 
-## Artefak final
+E2E updater membuktikan check -> download -> size bound -> SHA-256 -> satu klik
+memasuki tahap instalasi. E2E memakai `file:///` hanya melalui policy test-only;
+runtime produksi tetap menerima HTTPS saja.
 
-| Artefak | Ukuran | SHA-256 |
+## Rename dan migrasi
+
+- UI, title, EXE, tray, backup dialog, shortcut, installer, dan data directory
+  memakai nama Vibemacro.
+- Migrasi hanya menyalin delapan nama file data/backup yang diizinkan dari
+  `%LOCALAPPDATA%\VibeTimer` ke `%LOCALAPPDATA%\Vibemacro`.
+- Test membuktikan file lain tidak ikut disalin, migrasi idempotent, dan folder
+  sumber tidak dihapus.
+- Header codec lama tetap diterima agar macro/settings/profile/timer 1.0 kompatibel.
+
+## Installer upgrade E2E
+
+Upgrade test memakai AppId QA terpisah agar instalasi VibeTimer pengguna tidak
+tersentuh. Fixture lama dan installer Vibemacro memakai pipeline Inno yang sama.
+
+| Pemeriksaan | Hasil |
+|---|---|
+| Install fixture VibeTimer 1.0 | Lulus |
+| Upgrade ke Vibemacro 1.1.0 | Lulus |
+| `VibeTimer.exe` lama dihapus | Ya |
+| Display name/version | `Vibemacro 1.1.0` |
+| Single-instance second launch | Exit 0, satu runtime |
+| Data lama disalin byte-identik | Ya |
+| Data sumber dipertahankan | Ya |
+| Uninstall menghapus program | Ya |
+| Uninstall mempertahankan data | Ya |
+| Registrasi uninstall QA dibersihkan | Ya |
+| Registrasi produksi pengguna tidak berubah | Ya |
+
+AppId produksi tetap `{F677B6B9-347D-4D9F-9444-23A7DA9C6822}` agar installer
+1.1 dapat memperbarui VibeTimer 1.0 in-place. Mutex legacy dipertahankan untuk
+mencegah runtime lama dan baru berjalan bersamaan.
+
+## Artefak lokal
+
+| File | Ukuran | SHA-256 |
 |---|---:|---|
-| `target/release/VibeTimer.exe` | 388.608 byte | `E746F8C06D1411BE900669D78FFB3FAA42A2AB8D6644310941707E45BA1613BC` |
-| `dist/VibeTimer-Setup-1.0.0-x64.exe` | 2.440.989 byte | `8E2AFDC6B11CDB840F95CBD12E4E3975C159760189160976F01917268FE8DBBF` |
+| `target/release/Vibemacro.exe` | 391.168 byte | `D04E96E20516BFB5316D32492C556EC60B83744D4E8E7455AEC5D2745089C44D` |
+| `dist/Vibemacro-Setup-1.1.0-x64.exe` | 2.441.416 byte | `8F29322B3BFB761448A213847C348A4486E9B57D4733F9F91E90DA8DB5581A4C` |
+| `dist/Vibemacro-1.1.0-portable.exe` | 391.168 byte | `D04E96E20516BFB5316D32492C556EC60B83744D4E8E7455AEC5D2745089C44D` |
+| `dist/vibemacro-update.txt` | 210 byte | `08E99FDFB8DCEF0CD946AF5806E1C080C0E32CC041514C0D97FF9DFA938C76F0` |
 
-## Cakupan otomatis
+Manifest menunjuk asset release versi spesifik dan hash installer identik dengan
+`SHA256SUMS.txt`.
 
-Unit test mencakup validasi waktu, Smart Reset, version comparison, parser
-manifest HTTPS, SHA-256 known vectors, serialisasi dan migrasi state, CRC backup,
-penyimpanan atomik, recovery backup, timeline editing, batas library, batas
-delay, restart recovery timer, serta dua timer konkuren yang dispatch tepat satu
-kali per timer.
+## Malware dan secret scope
 
-Windows E2E membuat UI dan target edit control sungguhan, lalu memverifikasi:
+- Microsoft Defender custom scan pada installer dan portable EXE: exit 0,
+  `found no threats`.
+- `tools/security-scan.ps1 -IncludeHistory` memindai private-key marker,
+  GitHub/PAT, AWS, Google, Slack, generic assigned secret, working tree, dan
+  seluruh patch Git tanpa mencetak nilai yang mungkin sensitif.
+- Workflow tidak menyimpan API key/PAT. Release memakai `GITHUB_TOKEN` sementara
+  dengan permission hanya `contents: write`; CI memakai `contents: read`.
 
-- render tab Timer, Macro, Profiles, dan Settings;
-- Timer mode Enter serta Teks + Enter, cancel tanpa input, target PID salah;
-- Smart Reset dan Multi Timer;
-- macro recorder keyboard, mouse, wheel, dan `Esc`;
-- empat mode macro, lima pemicu, tiga lane, dan timeline editor;
-- playback Window Target tetap berjalan saat Alt+Tab tanpa mengubah foreground;
-- target yang ditutup menghentikan loop tanpa fallback ke window lain;
-- Tray Mode, Auto Start test double, dan Emergency Stop;
-- App Profiles, backup export/import, serta rollback state;
-- hook dinamis: tidak aktif untuk macro kosong, keduanya aktif saat recording,
-  lalu hanya hook yang diperlukan tetap terpasang;
-- updater lengkap dengan feed file lokal khusus `cfg(test)`: check → download →
-  SHA-256 → installer ready. Jalur production tetap HTTPS-only.
+Hasil ini adalah bukti scoped pada artefak dan pola yang diperiksa, bukan klaim
+universal bahwa software tidak mungkin memiliki kerentanan.
 
-## E2E installer
+## Visual dan performance
 
-Installer dibangun per-user dengan AppId stabil dan diuji pada root QA
-terisolasi:
+- Main Timer dan Settings snapshot diinspeksi pada resolusi asli: brand
+  Vibemacro, dark graphite, acid-lime, versi 1.1.0, dan label GitHub Releases
+  tampil bersih tanpa panel putih/ungu atau overlap.
+- Profil idle terisolasi selama 8 detik:
+  - CPU: 0,000% dari satu core
+  - handles: 146 -> 146
+  - threads: 4 -> 4
+  - working set: 10,47 MiB
+  - private memory: 1,86 MiB
+  - responding: true
 
-1. install silent selesai dengan exit code 0;
-2. hash executable terpasang identik dengan executable release;
-3. aplikasi terpasang dapat berjalan dan responsive;
-4. instance kedua keluar dengan code 0 dan jumlah proses tetap satu;
-5. uninstaller selesai dengan exit code 0;
-6. direktori program terhapus;
-7. marker data pengguna tetap tersedia sesudah uninstall.
+## GitHub release gate
 
-Wizard installer juga dibuka secara interaktif dan diperiksa pada resolusi asli.
-Hasilnya full dark, ikon VibeTimer benar, teks dan destination terbaca, serta
-tombol Back/Install/Cancel tidak bertabrakan.
-
-## Audit keamanan dan reliabilitas
-
-- Named mutex mencegah beberapa instance mengirim input bersamaan.
-- Clipboard reader dibatasi oleh ukuran alokasi dan terminator UTF-16.
-- File state memakai temporary file, `sync_all`, backup, dan rollback best-effort.
-- Import memvalidasi semua section sebelum mengganti state aktif.
-- ID, nama, target, jumlah object, dan delay divalidasi saat decode/encode.
-- Installer update tidak dapat dijalankan sebelum SHA-256 cocok.
-- Feed dan URL installer production wajib HTTPS.
-- Update ditolak ketika timer/macro/recording aktif atau perubahan belum disimpan.
-- Uninstaller hanya menghapus Run value jika command-nya tepat menunjuk instalasi
-  VibeTimer yang sedang dihapus.
-- `%LOCALAPPDATA%\VibeTimer` tidak menjadi target uninstall.
-
-Microsoft Defender memindai `VibeTimer.exe` dan installer final dengan custom
-scan tanpa remediation. Keduanya selesai exit code 0 dan melaporkan tidak ada
-threat. Hasil ini terbatas pada engine/signature Defender saat pengujian dan
-bukan jaminan universal bahwa software bebas dari seluruh kemungkinan risiko.
-
-## Performa profil kosong terisolasi
-
-Pengukuran executable v1.0 final selama delapan detik, dengan data QA kosong dan
-update startup nonaktif:
-
-| Metrik | Hasil |
-|---|---:|
-| CPU | 0,000% dari satu core |
-| Thread | 4 → 4 |
-| Handle | 146 → 146 |
-| Working set | 10,41 MiB |
-| Private memory | 1,86 MiB |
-| Status | Responsive |
+Workflow release dipicu hanya oleh tag `v*.*.*`, memverifikasi tag sama dengan
+Cargo version, menjalankan credential scan dan seluruh build/test gate, lalu
+membuat GitHub Release dengan installer, portable EXE, manifest tetap, dan
+checksums. Asset live dan endpoint `/releases/latest/download/` harus diverifikasi
+lagi setelah tag 1.1.0 dipublikasikan.
 
 ## Risiko tersisa
 
-- EXE dan installer belum ditandatangani. SmartScreen dapat memperingatkan
-  Unknown Publisher sampai tersedia sertifikat code-signing dan reputasi rilis.
-- Background macro bergantung pada dukungan window message aplikasi target.
-- Raw Input, DirectInput, anti-cheat, dan target elevated dapat menolak input.
-- Feed update online belum diaktifkan karena proyek belum memiliki URL rilis
-  HTTPS. Engine sudah ada, default off, dan tidak mengklaim update online aktif.
+- EXE dan installer berstatus `NotSigned`; SmartScreen dapat memberi peringatan.
+- Code signing Authenticode tetap direkomendasikan sebelum distribusi luas.
+- Mouse 4/5 fisik dan kompatibilitas game tertentu memerlukan smoke test user.
+- Raw Input/DirectInput/anti-cheat dapat mengabaikan background window message;
+  Vibemacro tidak menyediakan bypass.

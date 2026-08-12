@@ -1,4 +1,4 @@
-//! Logika murni VibeTimer yang dapat diuji tanpa Windows UI.
+//! Logika murni Vibemacro yang dapat diuji tanpa Windows UI.
 
 pub mod backup;
 pub mod macro_engine;

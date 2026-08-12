@@ -3,6 +3,8 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
+use crate::settings::data_directory;
+
 use crate::settings::{read_with_backup_recovery, save_atomic};
 
 #[cfg(test)]
@@ -247,10 +249,7 @@ pub fn insert_delay(
 }
 
 pub fn default_data_path() -> PathBuf {
-    let base = std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    base.join("VibeTimer").join("macros.vtm")
+    data_directory().join("macros.vtm")
 }
 
 pub fn load_library(path: &Path) -> io::Result<MacroLibrary> {
@@ -343,7 +342,7 @@ pub fn encode_library(library: &MacroLibrary) -> io::Result<Vec<u8>> {
 pub fn decode_library(bytes: &[u8]) -> Result<MacroLibrary, &'static str> {
     let mut reader = Reader::new(bytes);
     if reader.take(4)? != MAGIC {
-        return Err("File macro bukan format VibeTimer.");
+        return Err("File macro bukan format Vibemacro/VibeTimer.");
     }
     let version = reader.u16()?;
     if !matches!(version, 1 | VERSION) {
@@ -708,7 +707,7 @@ mod tests {
     fn rejects_wrong_magic_and_truncated_data() {
         assert_eq!(
             decode_library(b"NOPE"),
-            Err("File macro bukan format VibeTimer.")
+            Err("File macro bukan format Vibemacro/VibeTimer.")
         );
         assert_eq!(decode_library(b"VTM1\x01"), Err("File macro terpotong."));
     }

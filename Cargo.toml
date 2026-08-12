@@ -1,16 +1,18 @@
 [package]
-name = "vibe-timer"
-version = "1.0.0"
+name = "vibemacro"
+version = "1.1.0"
 edition = "2024"
-description = "Timer Windows ringan untuk melanjutkan sesi AI setelah usage limit reset"
+description = "Timer dan macro Windows-native yang ringan, aman, dan vendor-neutral"
 license = "MIT"
+repository = "https://github.com/Helveticxa/Vibemacro"
+homepage = "https://github.com/Helveticxa/Vibemacro"
 
 [lib]
-name = "vibe_timer_core"
+name = "vibemacro_core"
 path = "src/lib.rs"
 
 [[bin]]
-name = "VibeTimer"
+name = "Vibemacro"
 path = "src/main.rs"
 
 [profile.release]

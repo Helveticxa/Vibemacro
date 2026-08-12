@@ -7,8 +7,8 @@ Add-Type -AssemblyName System.Drawing
 
 $output = [System.IO.Path]::GetFullPath($OutputDirectory)
 [System.IO.Directory]::CreateDirectory($output) | Out-Null
-$pngPath = Join-Path $output 'VibeTimer.png'
-$icoPath = Join-Path $output 'VibeTimer.ico'
+$pngPath = Join-Path $output 'Vibemacro.png'
+$icoPath = Join-Path $output 'Vibemacro.ico'
 
 $bitmap = New-Object System.Drawing.Bitmap 256, 256, ([System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
 $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
@@ -76,4 +76,3 @@ $bitmap.Dispose()
 
 Write-Output "Generated $pngPath"
 Write-Output "Generated $icoPath"
-

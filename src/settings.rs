@@ -1,4 +1,4 @@
-//! Pengaturan runtime VibeTimer yang dapat diuji tanpa Win32.
+//! Pengaturan runtime Vibemacro yang dapat diuji tanpa Win32.
 
 use std::fs;
 use std::io::{self, Write};
@@ -48,7 +48,7 @@ impl Default for AppSettings {
             emergency_stops_timers: true,
             max_macro_runtime_seconds: 30 * 60,
             max_macro_repeats: 10_000,
-            update_checks_enabled: false,
+            update_checks_enabled: true,
         }
     }
 }
@@ -68,7 +68,47 @@ pub fn data_directory() -> PathBuf {
     std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir)
+        .join("Vibemacro")
+}
+
+pub fn legacy_data_directory() -> PathBuf {
+    std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
         .join("VibeTimer")
+}
+
+/// Menyalin hanya file data yang dikenal dari nama produk lama. Folder lama
+/// sengaja tidak dihapus agar migrasi selalu dapat dipulihkan.
+pub fn migrate_legacy_data() -> io::Result<usize> {
+    migrate_legacy_data_between(&legacy_data_directory(), &data_directory())
+}
+
+fn migrate_legacy_data_between(legacy: &Path, current: &Path) -> io::Result<usize> {
+    const KNOWN_FILES: [&str; 8] = [
+        "settings.vts",
+        "settings.bak",
+        "macros.vtm",
+        "macros.bak",
+        "profiles.vtp",
+        "profiles.bak",
+        "timers.vtt",
+        "timers.bak",
+    ];
+    if !legacy.is_dir() {
+        return Ok(0);
+    }
+    fs::create_dir_all(current)?;
+    let mut copied = 0;
+    for name in KNOWN_FILES {
+        let source = legacy.join(name);
+        let destination = current.join(name);
+        if source.is_file() && !destination.exists() {
+            fs::copy(source, destination)?;
+            copied += 1;
+        }
+    }
+    Ok(copied)
 }
 
 pub fn load_settings(path: &Path) -> io::Result<AppSettings> {
@@ -144,7 +184,7 @@ pub fn encode_settings(settings: &AppSettings) -> Vec<u8> {
 
 pub fn decode_settings(bytes: &[u8]) -> Result<AppSettings, &'static str> {
     if bytes.len() != 20 || bytes.get(..4) != Some(MAGIC) {
-        return Err("File pengaturan bukan format VibeTimer.");
+        return Err("File pengaturan bukan format Vibemacro/VibeTimer.");
     }
     let version = u16::from_le_bytes(bytes[4..6].try_into().map_err(|_| "File terpotong.")?);
     if version != VERSION {
@@ -234,5 +274,32 @@ mod tests {
         assert!(path.exists(), "primary dikembalikan dari backup");
         fs::remove_file(path).expect("file dibersihkan");
         fs::remove_dir(directory).expect("folder dibersihkan");
+    }
+
+    #[test]
+    fn legacy_data_migration_is_allowlisted_and_non_destructive() {
+        let base =
+            std::env::temp_dir().join(format!("vibemacro-migration-test-{}", std::process::id()));
+        let legacy = base.join("VibeTimer");
+        let current = base.join("Vibemacro");
+        fs::create_dir_all(&legacy).expect("folder legacy dibuat");
+        fs::write(legacy.join("settings.vts"), b"settings").expect("settings legacy dibuat");
+        fs::write(legacy.join("not-a-data-file.txt"), b"private").expect("file lain dibuat");
+
+        assert_eq!(
+            migrate_legacy_data_between(&legacy, &current).expect("migrasi berhasil"),
+            1
+        );
+        assert_eq!(
+            fs::read(current.join("settings.vts")).expect("hasil migrasi dibaca"),
+            b"settings"
+        );
+        assert!(!current.join("not-a-data-file.txt").exists());
+        assert!(legacy.join("settings.vts").exists(), "sumber tidak dihapus");
+        assert_eq!(
+            migrate_legacy_data_between(&legacy, &current).expect("migrasi idempotent"),
+            0
+        );
+        fs::remove_dir_all(base).expect("fixture dibersihkan");
     }
 }

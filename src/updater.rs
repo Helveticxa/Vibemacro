@@ -4,8 +4,10 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-const MANIFEST_HEADER: &str = "VIBETIMER-UPDATE-1";
+const MANIFEST_HEADER: &str = "VIBEMACRO-UPDATE-1";
 const MAX_MANIFEST_BYTES: usize = 8 * 1024;
+pub const DEFAULT_FEED_URL: &str =
+    "https://github.com/Helveticxa/Vibemacro/releases/latest/download/vibemacro-update.txt";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateManifest {
@@ -15,10 +17,16 @@ pub struct UpdateManifest {
 }
 
 pub fn configured_feed_url() -> Option<String> {
-    std::env::var("VIBETIMER_UPDATE_FEED_URL")
+    std::env::var("VIBEMACRO_UPDATE_FEED_URL")
         .ok()
         .filter(|value| !value.trim().is_empty())
-        .or_else(|| option_env!("VIBETIMER_UPDATE_FEED_URL").map(str::to_owned))
+        .or_else(|| {
+            std::env::var("VIBETIMER_UPDATE_FEED_URL")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        })
+        .or_else(|| option_env!("VIBEMACRO_UPDATE_FEED_URL").map(str::to_owned))
+        .or_else(|| Some(DEFAULT_FEED_URL.to_owned()))
 }
 
 pub fn parse_manifest(bytes: &[u8]) -> Result<UpdateManifest, &'static str> {
@@ -250,7 +258,7 @@ mod tests {
 
     #[test]
     fn manifest_is_strict_and_https_only() {
-        let valid = b"VIBETIMER-UPDATE-1\nversion=1.2.3\ninstaller=https://example.com/VibeTimerSetup.exe\nsha256=BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD\n";
+        let valid = b"VIBEMACRO-UPDATE-1\nversion=1.2.3\ninstaller=https://example.com/VibemacroSetup.exe\nsha256=BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD\n";
         let parsed = parse_manifest(valid).expect("manifest valid");
         assert_eq!(parsed.version, "1.2.3");
         assert!(parse_manifest(&valid[..20]).is_err());
@@ -266,5 +274,14 @@ mod tests {
         assert_eq!(is_newer_version("1.10.0", "1.9.9"), Ok(true));
         assert_eq!(is_newer_version("1.0.0", "1.0.0"), Ok(false));
         assert!(is_newer_version("1.0-beta", "1.0.0").is_err());
+    }
+
+    #[test]
+    fn default_feed_is_the_public_github_release_asset() {
+        assert_eq!(
+            DEFAULT_FEED_URL,
+            "https://github.com/Helveticxa/Vibemacro/releases/latest/download/vibemacro-update.txt"
+        );
+        assert!(validate_feed_url(DEFAULT_FEED_URL).is_ok());
     }
 }

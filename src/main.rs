@@ -12,32 +12,31 @@ use std::time::{Duration, Instant};
 #[cfg(test)]
 use std::sync::atomic::{AtomicIsize, AtomicUsize};
 
-use vibe_timer_core::backup::{BackupBundle, load_backup, save_backup};
-use vibe_timer_core::macro_engine::{
+use vibemacro_core::backup::{BackupBundle, load_backup, save_backup};
+use vibemacro_core::macro_engine::{
     MacroDefinition, MacroEvent, MacroLibrary, MacroMode, MacroTarget, MacroTrigger, MouseButton,
     default_data_path, delete_event, duplicate_event, insert_delay, load_library, move_event,
     save_library,
 };
-use vibe_timer_core::profiles::{
+use vibemacro_core::profiles::{
     ProfileLibrary, default_profiles_path, load_profiles, save_profiles,
 };
-use vibe_timer_core::settings::{
-    AppSettings, EmergencyHotkey, default_settings_path, load_settings, save_settings,
+use vibemacro_core::settings::{
+    AppSettings, EmergencyHotkey, default_settings_path, load_settings, migrate_legacy_data,
+    save_settings,
 };
-use vibe_timer_core::smart_reset::{ClockContext, parse_reset_text};
-use vibe_timer_core::timers::{
+use vibemacro_core::smart_reset::{ClockContext, parse_reset_text};
+use vibemacro_core::timers::{
     TimerAction, TimerLibrary, TimerPhase, default_timers_path, load_timers, now_unix_ms,
     save_timers,
 };
-use vibe_timer_core::updater::{
-    UpdateManifest, configured_feed_url, is_newer_version, sha256_file,
-};
-use vibe_timer_core::{DurationFields, format_duration};
+use vibemacro_core::updater::{UpdateManifest, configured_feed_url, is_newer_version, sha256_file};
+use vibemacro_core::{DurationFields, format_duration};
 
 #[cfg(test)]
-use vibe_timer_core::updater::{digest_hex, parse_test_manifest, validate_test_feed_url};
+use vibemacro_core::updater::{digest_hex, parse_test_manifest, validate_test_feed_url};
 #[cfg(not(test))]
-use vibe_timer_core::updater::{parse_manifest, validate_feed_url};
+use vibemacro_core::updater::{parse_manifest, validate_feed_url};
 
 type Bool = i32;
 type Dword = u32;
@@ -258,6 +257,8 @@ static TEST_INPUT_TARGET: AtomicIsize = AtomicIsize::new(0);
 static TEST_MACRO_INPUT_COUNT: AtomicUsize = AtomicUsize::new(0);
 #[cfg(test)]
 static TEST_AUTOSTART_ENABLED: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+static TEST_UPDATE_LAUNCH_COUNT: AtomicUsize = AtomicUsize::new(0);
 static APP_STATE_POINTER: AtomicPtr<AppState> = AtomicPtr::new(null_mut());
 static MACRO_PLAYING: AtomicBool = AtomicBool::new(false);
 static MACRO_PLAYING_ID: AtomicU32 = AtomicU32::new(0);
@@ -2082,7 +2083,7 @@ unsafe fn draw_brand_header_v3(dc: Hdc, state: &AppState) {
         draw_clock_mark(dc);
         draw_label(
             dc,
-            "VibeTimer",
+            "Vibemacro",
             Rect::new(68, 17, 270, 50),
             COLOR_TEXT,
             state.fonts.title,
@@ -2115,7 +2116,7 @@ unsafe fn draw_timer_interface_v3(dc: Hdc, state: &AppState) {
         draw_label(
             dc,
             if state.running {
-                "VibeTimer akan melanjutkan tepat saat nol."
+                "Vibemacro akan melanjutkan tepat saat nol."
             } else {
                 "Atur sekali. Lanjut otomatis."
             },
@@ -3495,7 +3496,7 @@ unsafe fn draw_settings_interface(dc: Hdc, state: &AppState) {
         ) {
             format!("Instal v{} yang terverifikasi", manifest.version)
         } else if let Some(manifest) = state.update_available.as_ref() {
-            format!("Unduh VibeTimer v{}", manifest.version)
+            format!("Unduh Vibemacro v{}", manifest.version)
         } else {
             "Cek update sekarang".to_owned()
         };
@@ -3518,17 +3519,10 @@ unsafe fn draw_settings_interface(dc: Hdc, state: &AppState) {
         );
         draw_label(
             dc,
-            &if configured_feed_url().is_some() {
-                format!(
-                    "Versi {} • installer wajib lolos SHA-256",
-                    env!("CARGO_PKG_VERSION")
-                )
-            } else {
-                format!(
-                    "Versi {} • feed rilis belum dikonfigurasi",
-                    env!("CARGO_PKG_VERSION")
-                )
-            },
+            &format!(
+                "Versi {} • GitHub Releases + SHA-256",
+                env!("CARGO_PKG_VERSION")
+            ),
             Rect::new(42, 480, 382, 510),
             COLOR_MUTED,
             state.fonts.small,
@@ -3677,7 +3671,7 @@ unsafe fn draw_macro_interface(dc: Hdc, state: &AppState) {
         draw_clock_mark(dc);
         draw_label(
             dc,
-            "VibeTimer",
+            "Vibemacro",
             Rect::new(62, 20, 260, 48),
             COLOR_TEXT,
             state.fonts.title,
@@ -4056,7 +4050,7 @@ unsafe fn draw_interface(dc: Hdc, state: &AppState) {
         draw_clock_mark(dc);
         draw_label(
             dc,
-            "VibeTimer",
+            "Vibemacro",
             Rect::new(62, 20, 260, 48),
             COLOR_TEXT,
             state.fonts.title,
@@ -4115,7 +4109,7 @@ unsafe fn draw_interface(dc: Hdc, state: &AppState) {
             }
             draw_label(
                 dc,
-                "VibeTimer akan melakukan aksi satu kali saat mencapai nol.",
+                "Vibemacro akan melakukan aksi satu kali saat mencapai nol.",
                 Rect::new(48, 234, 472, 256),
                 COLOR_MUTED,
                 state.fonts.small,
@@ -4605,10 +4599,11 @@ unsafe fn configure_auto_start(enabled: bool) -> Result<(), String> {
 #[cfg(not(test))]
 unsafe fn configure_auto_start(enabled: bool) -> Result<(), String> {
     let key = wide("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
-    let value_name = wide("VibeTimer");
+    let value_name = wide("Vibemacro");
+    let legacy_value_name = wide("VibeTimer");
     let status = if enabled {
         let executable = std::env::current_exe()
-            .map_err(|error| format!("Lokasi VibeTimer tidak ditemukan: {error}"))?;
+            .map_err(|error| format!("Lokasi Vibemacro tidak ditemukan: {error}"))?;
         let command = format!("\"{}\" --background", executable.display());
         let data = wide(&command);
         unsafe {
@@ -4622,9 +4617,25 @@ unsafe fn configure_auto_start(enabled: bool) -> Result<(), String> {
             )
         }
     } else {
-        unsafe { RegDeleteKeyValueW(HKEY_CURRENT_USER, key.as_ptr(), value_name.as_ptr()) }
+        let current =
+            unsafe { RegDeleteKeyValueW(HKEY_CURRENT_USER, key.as_ptr(), value_name.as_ptr()) };
+        let legacy = unsafe {
+            RegDeleteKeyValueW(HKEY_CURRENT_USER, key.as_ptr(), legacy_value_name.as_ptr())
+        };
+        if (current == 0 || current == 2) && (legacy == 0 || legacy == 2) {
+            0
+        } else if current != 0 && current != 2 {
+            current
+        } else {
+            legacy
+        }
     };
     if status == 0 || (!enabled && status == 2) {
+        if enabled {
+            let _ = unsafe {
+                RegDeleteKeyValueW(HKEY_CURRENT_USER, key.as_ptr(), legacy_value_name.as_ptr())
+            };
+        }
         Ok(())
     } else {
         Err(format!(
@@ -4722,8 +4733,8 @@ fn download_update_worker(manifest: UpdateManifest, cache: &Path) -> UpdateWorke
     if let Err(error) = std::fs::create_dir_all(cache) {
         return UpdateWorkerResult::Error(format!("Folder update tidak dapat dibuat: {error}"));
     }
-    let final_path = cache.join(format!("VibeTimer-Setup-{}.exe", manifest.version));
-    let temporary = cache.join(format!("VibeTimer-Setup-{}.download", manifest.version));
+    let final_path = cache.join(format!("Vibemacro-Setup-{}.exe", manifest.version));
+    let temporary = cache.join(format!("Vibemacro-Setup-{}.download", manifest.version));
     let _ = std::fs::remove_file(&temporary);
     if let Err(message) = download_url_to_path(&manifest.installer_url, &temporary) {
         return UpdateWorkerResult::Error(message);
@@ -4824,6 +4835,7 @@ unsafe fn begin_update_download(state: &mut AppState, manifest: UpdateManifest) 
 
 #[cfg(test)]
 unsafe fn launch_verified_update(state: &mut AppState) {
+    TEST_UPDATE_LAUNCH_COUNT.fetch_add(1, Ordering::AcqRel);
     state.settings_status_kind = StatusKind::Sent;
     state.settings_status = "Installer update terverifikasi dan siap dijalankan.".to_owned();
     unsafe { InvalidateRect(state.window, null(), FALSE) };
@@ -4857,11 +4869,11 @@ unsafe fn launch_verified_update(state: &mut AppState) {
         MessageBoxW(
             state.window,
             wide(&format!(
-                "Installer VibeTimer v{} sudah lolos verifikasi SHA-256. Jalankan installer dan tutup aplikasi sekarang?",
+                "Installer Vibemacro v{} sudah lolos verifikasi SHA-256. Jalankan installer dan tutup aplikasi sekarang?",
                 manifest.version
             ))
             .as_ptr(),
-            wide("Update VibeTimer terverifikasi").as_ptr(),
+            wide("Update Vibemacro terverifikasi").as_ptr(),
             MB_YESNO | MB_ICONINFORMATION,
         )
     };
@@ -4898,13 +4910,13 @@ unsafe fn add_tray_icon(state: &mut AppState) -> Result<(), String> {
         icon: state.tray_icon,
         ..NotifyIconDataW::default()
     };
-    copy_wide(&mut data.tip, "VibeTimer — siap");
+    copy_wide(&mut data.tip, "Vibemacro — siap");
     if unsafe { Shell_NotifyIconW(NIM_ADD, &mut data) } == FALSE {
         if state.tray_icon != 0 {
             unsafe { DestroyIcon(state.tray_icon) };
             state.tray_icon = 0;
         }
-        return Err("System tray Windows menolak ikon VibeTimer.".to_owned());
+        return Err("System tray Windows menolak ikon Vibemacro.".to_owned());
     }
     state.tray_added = true;
     Ok(())
@@ -4958,7 +4970,7 @@ unsafe fn show_tray_menu(state: &AppState) {
         return;
     }
     unsafe {
-        AppendMenuW(menu, MF_STRING, MENU_OPEN, wide("Buka VibeTimer").as_ptr());
+        AppendMenuW(menu, MF_STRING, MENU_OPEN, wide("Buka Vibemacro").as_ptr());
         AppendMenuW(
             menu,
             MF_STRING,
@@ -4986,13 +4998,13 @@ unsafe fn show_tray_menu(state: &AppState) {
 unsafe fn choose_backup_path(window: Hwnd, save: bool) -> Option<PathBuf> {
     let mut file = [0u16; 32_768];
     if save {
-        copy_wide(&mut file, "VibeTimer-backup.vtb");
+        copy_wide(&mut file, "Vibemacro-backup.vtb");
     }
-    let filter = wide("VibeTimer Backup (*.vtb)\0*.vtb\0Semua file (*.*)\0*.*\0");
+    let filter = wide("Vibemacro Backup (*.vtb)\0*.vtb\0Semua file (*.*)\0*.*\0");
     let title = wide(if save {
-        "Export backup VibeTimer"
+        "Export backup Vibemacro"
     } else {
-        "Import backup VibeTimer"
+        "Import backup Vibemacro"
     });
     let extension = wide("vtb");
     let mut data = OpenFileNameW {
@@ -5082,7 +5094,7 @@ unsafe fn export_backup_to_path(state: &mut AppState, path: &Path) {
                 "Backup tersimpan: {}",
                 path.file_name()
                     .and_then(|name| name.to_str())
-                    .unwrap_or("VibeTimer-backup.vtb")
+                    .unwrap_or("Vibemacro-backup.vtb")
             );
         }
         Err(error) => {
@@ -5166,7 +5178,7 @@ unsafe fn import_backup_from_path(state: &mut AppState, path: &Path) {
         "Backup {} berhasil diimpor dan divalidasi.",
         path.file_name()
             .and_then(|name| name.to_str())
-            .unwrap_or("VibeTimer")
+            .unwrap_or("Vibemacro")
     );
     unsafe { InvalidateRect(state.window, null(), FALSE) };
 }
@@ -5199,7 +5211,7 @@ unsafe fn emergency_stop(state: &mut AppState, source: &str) {
     unsafe {
         show_tray_notification(
             state,
-            "VibeTimer dihentikan",
+            "Vibemacro dihentikan",
             "Semua macro berhenti. Timer mengikuti pengaturan Emergency Stop.",
         );
         MessageBeep(MB_ICONWARNING);
@@ -5366,7 +5378,7 @@ unsafe fn show_error(window: Hwnd, message: &str) {
         MessageBoxW(
             window,
             wide(message).as_ptr(),
-            wide("VibeTimer").as_ptr(),
+            wide("Vibemacro").as_ptr(),
             MB_OK | MB_ICONERROR,
         );
     }
@@ -5377,7 +5389,7 @@ unsafe fn show_warning(window: Hwnd, message: &str) {
         MessageBoxW(
             window,
             wide(message).as_ptr(),
-            wide("VibeTimer").as_ptr(),
+            wide("Vibemacro").as_ptr(),
             MB_OK | MB_ICONWARNING,
         );
     }
@@ -5400,7 +5412,7 @@ unsafe fn validate_target(target: &TargetWindow) -> Result<(), String> {
 }
 
 unsafe fn begin_target_capture(state: &mut AppState) {
-    let instruction = "Setelah menekan OK, VibeTimer akan mengecil selama 3 detik.\n\nBuka jendela AI lalu klik tepat di kolom input tempat perintah harus diketik.";
+    let instruction = "Setelah menekan OK, Vibemacro akan mengecil selama 3 detik.\n\nBuka jendela AI lalu klik tepat di kolom input tempat perintah harus diketik.";
     let response = unsafe {
         MessageBoxW(
             state.window,
@@ -5428,7 +5440,7 @@ unsafe fn begin_macro_target_capture(state: &mut AppState) {
     if state.recording || state.macro_library.selected().is_none() {
         return;
     }
-    let instruction = "Setelah menekan OK, VibeTimer mengecil selama 3 detik.\n\nKlik tepat pada area game atau aplikasi yang harus menerima macro. Posisi klik saat recording akan disimpan relatif ke window ini.";
+    let instruction = "Setelah menekan OK, Vibemacro mengecil selama 3 detik.\n\nKlik tepat pada area game atau aplikasi yang harus menerima macro. Posisi klik saat recording akan disimpan relatif ke window ini.";
     let response = unsafe {
         MessageBoxW(
             state.window,
@@ -5455,7 +5467,7 @@ unsafe fn begin_profile_target_capture(state: &mut AppState) {
     if state.profile_library.selected().is_none() {
         return;
     }
-    let instruction = "Setelah menekan OK, VibeTimer mengecil selama 3 detik.\n\nKlik area aplikasi atau game untuk profil ini. Semua macro yang ditautkan akan memakai target yang sama.";
+    let instruction = "Setelah menekan OK, Vibemacro mengecil selama 3 detik.\n\nKlik area aplikasi atau game untuk profil ini. Semua macro yang ditautkan akan memakai target yang sama.";
     let response = unsafe {
         MessageBoxW(
             state.window,
@@ -5976,7 +5988,7 @@ unsafe fn focus_target(target: Hwnd) -> Result<(), String> {
         }
         #[cfg(not(test))]
         {
-            Err("Windows tidak mengizinkan VibeTimer memfokuskan jendela target.".to_owned())
+            Err("Windows tidak mengizinkan Vibemacro memfokuskan jendela target.".to_owned())
         }
     }
 }
@@ -6020,7 +6032,7 @@ unsafe fn begin_timer(state: &mut AppState) {
             unsafe {
                 show_error(
                     state.window,
-                    "Pilih jendela AI terlebih dahulu agar VibeTimer tidak mengetik ke tempat yang salah.",
+                    "Pilih jendela AI terlebih dahulu agar Vibemacro tidak mengetik ke tempat yang salah.",
                 );
                 InvalidateRect(state.window, null(), FALSE);
             }
@@ -7346,7 +7358,7 @@ unsafe fn confirm_import_backup(window: Hwnd) -> bool {
         MessageBoxW(
             window,
             wide("Import akan mengganti macro, profil, timer, dan Settings saat ini. Timer aktif dari backup selalu dibatalkan demi keamanan. Lanjutkan?").as_ptr(),
-            wide("Import backup VibeTimer").as_ptr(),
+            wide("Import backup Vibemacro").as_ptr(),
             MB_YESNO | MB_ICONWARNING,
         ) == IDYES
     }
@@ -7473,7 +7485,7 @@ unsafe fn handle_click(state: &mut AppState, target: HitTarget) {
         HitTarget::EnterOnly => {
             state.action_mode = ActionMode::EnterOnly;
             state.status_kind = StatusKind::Ready;
-            state.status = "Saat nol, VibeTimer hanya menekan Enter.".to_owned();
+            state.status = "Saat nol, Vibemacro hanya menekan Enter.".to_owned();
             unsafe {
                 state.set_prompt_enabled();
                 InvalidateRect(state.window, null(), FALSE);
@@ -7812,7 +7824,7 @@ unsafe fn handle_click(state: &mut AppState, target: HitTarget) {
                         persist_settings(
                             state,
                             if enabled {
-                                "VibeTimer akan mulai di tray bersama Windows."
+                                "Vibemacro akan mulai di tray bersama Windows."
                             } else {
                                 "Auto Start dinonaktifkan."
                             },
@@ -8097,6 +8109,7 @@ unsafe extern "system" fn window_proc(
                 if state.timer_library.running_count() > 0 {
                     SetTimer(state.window, TIMER_COUNTDOWN, 100, null());
                 }
+                #[cfg(not(test))]
                 if state.settings.update_checks_enabled {
                     begin_update_check(state);
                 }
@@ -8294,7 +8307,7 @@ unsafe extern "system" fn window_proc(
                     state.update_installer_ready = None;
                     state.settings_status_kind = StatusKind::Sent;
                     state.settings_status = format!(
-                        "VibeTimer v{} sudah merupakan versi terbaru.",
+                        "Vibemacro v{} sudah merupakan versi terbaru.",
                         env!("CARGO_PKG_VERSION")
                     );
                 }
@@ -8302,13 +8315,13 @@ unsafe extern "system" fn window_proc(
                     state.update_installer_ready = None;
                     state.settings_status_kind = StatusKind::Warning;
                     state.settings_status = format!(
-                        "VibeTimer v{} tersedia. Klik Unduh untuk melanjutkan.",
+                        "Vibemacro v{} tersedia. Klik Unduh untuk melanjutkan.",
                         manifest.version
                     );
                     unsafe {
                         show_tray_notification(
                             state,
-                            "Update VibeTimer tersedia",
+                            "Update Vibemacro tersedia",
                             &format!("Versi {} siap diunduh dari tab Settings.", manifest.version),
                         )
                     };
@@ -8322,6 +8335,7 @@ unsafe extern "system" fn window_proc(
                     );
                     state.update_available = Some(manifest);
                     state.update_installer_ready = Some(path);
+                    unsafe { launch_verified_update(state) };
                 }
                 UpdateWorkerResult::Error(message) => {
                     state.settings_status_kind = StatusKind::Error;
@@ -8353,7 +8367,7 @@ unsafe extern "system" fn window_proc(
                     ShowWindow(window, SW_HIDE);
                     show_tray_notification(
                         state,
-                        "VibeTimer tetap aktif",
+                        "Vibemacro tetap aktif",
                         "Timer dan macro tetap berjalan. Klik ikon tray untuk membuka kembali.",
                     );
                 }
@@ -8366,7 +8380,7 @@ unsafe extern "system" fn window_proc(
                 let response = unsafe {
                     MessageBoxW(
                         window,
-                        wide("Satu atau lebih timer masih aktif. Tutup VibeTimer? Timer masa depan akan dilanjutkan saat aplikasi dibuka lagi; timer yang terlewat tidak akan mengirim input.")
+                        wide("Satu atau lebih timer masih aktif. Tutup Vibemacro? Timer masa depan akan dilanjutkan saat aplikasi dibuka lagi; timer yang terlewat tidak akan mengirim input.")
                             .as_ptr(),
                         wide("Multi Timer sedang berjalan").as_ptr(),
                         MB_YESNO | MB_ICONWARNING,
@@ -8438,7 +8452,7 @@ unsafe extern "system" fn window_proc(
 }
 
 unsafe fn create_main_window(instance: Hinstance) -> Result<Hwnd, String> {
-    let class_name = wide("VibeTimerWindowClass");
+    let class_name = wide("VibemacroWindowClass");
     let window_class = WndClassW {
         style: 0x0002 | 0x0001,
         wnd_proc: Some(window_proc),
@@ -8466,7 +8480,7 @@ unsafe fn create_main_window(instance: Hinstance) -> Result<Hwnd, String> {
         CreateWindowExW(
             0,
             class_name.as_ptr(),
-            wide("VibeTimer").as_ptr(),
+            wide("Vibemacro").as_ptr(),
             style,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
@@ -8526,7 +8540,7 @@ fn run() -> Result<(), String> {
         let already_running = GetLastError() == ERROR_ALREADY_EXISTS;
         let _mutex_guard = OwnedKernelHandle(mutex);
         if already_running {
-            let class_name = wide("VibeTimerWindowClass");
+            let class_name = wide("VibemacroWindowClass");
             let existing = FindWindowW(class_name.as_ptr(), null());
             if existing != 0 {
                 ShowWindow(existing, SW_RESTORE);
@@ -8534,6 +8548,9 @@ fn run() -> Result<(), String> {
             }
             return Ok(());
         }
+
+        migrate_legacy_data()
+            .map_err(|error| format!("Migrasi data VibeTimer ke Vibemacro gagal: {error}"))?;
 
         let instance = GetModuleHandleW(null());
         if instance == 0 {
@@ -8574,7 +8591,7 @@ fn main() {
             MessageBoxW(
                 0,
                 wide(&message).as_ptr(),
-                wide("VibeTimer gagal dimulai").as_ptr(),
+                wide("Vibemacro gagal dimulai").as_ptr(),
                 MB_OK | MB_ICONERROR,
             );
         }
@@ -8622,7 +8639,7 @@ mod windows_e2e_tests {
     }
 
     unsafe fn create_background_target(instance: Hinstance, title: &str) -> Hwnd {
-        let class_name = wide("VibeTimerBackgroundTargetClass");
+        let class_name = wide("VibemacroBackgroundTargetClass");
         let class = WndClassW {
             style: 0,
             wnd_proc: Some(background_target_proc),
@@ -8776,10 +8793,10 @@ mod windows_e2e_tests {
             pump_messages_for(Duration::from_millis(100));
 
             fs::create_dir_all("qa").expect("folder QA dibuat");
-            save_window_bmp(main_window, Path::new("qa/vibetimer-idle.bmp"))
+            save_window_bmp(main_window, Path::new("qa/vibemacro-idle.bmp"))
                 .expect("snapshot idle dibuat");
 
-            let target_title = wide("VibeTimer E2E Target");
+            let target_title = wide("Vibemacro E2E Target");
             let static_class = wide("STATIC");
             let target_window = CreateWindowExW(
                 0,
@@ -8894,7 +8911,7 @@ mod windows_e2e_tests {
                 process_executable_name(GetCurrentProcessId()).expect("executable test ditemukan");
             state.profile_library.selected_mut().unwrap().target = Some(MacroTarget {
                 executable,
-                window_title: "VibeTimer E2E Target".to_owned(),
+                window_title: "Vibemacro E2E Target".to_owned(),
             });
             handle_click(state, HitTarget::ProfileMacro(0));
             assert!(state.profile_library.selected().unwrap().contains_macro(1));
@@ -8902,7 +8919,7 @@ mod windows_e2e_tests {
             handle_click(state, HitTarget::ProfileUseTimer);
             assert_eq!(
                 state.target.as_ref().map(|target| target.title.as_str()),
-                Some("VibeTimer E2E Target")
+                Some("Vibemacro E2E Target")
             );
             SetWindowTextW(state.profile_name_edit, wide("AI Workspace").as_ptr());
             handle_click(state, HitTarget::ProfileSave);
@@ -8925,7 +8942,7 @@ mod windows_e2e_tests {
             InvalidateRect(main_window, null(), FALSE);
             UpdateWindow(main_window);
             pump_messages_for(Duration::from_millis(120));
-            save_window_bmp(main_window, Path::new("qa/vibetimer-profiles.bmp"))
+            save_window_bmp(main_window, Path::new("qa/vibemacro-profiles.bmp"))
                 .expect("snapshot Profiles dibuat");
 
             state.macro_library = MacroLibrary::default();
@@ -8957,7 +8974,7 @@ mod windows_e2e_tests {
             assert!(!state.settings.auto_start);
             assert!(!TEST_AUTOSTART_ENABLED.load(Ordering::Acquire));
 
-            fs::write(&e2e_update_source_path, b"VibeTimer E2E installer")
+            fs::write(&e2e_update_source_path, b"Vibemacro E2E installer")
                 .expect("artefak update E2E dibuat");
             let update_digest = digest_hex(
                 &sha256_file(&e2e_update_source_path).expect("hash update E2E dihitung"),
@@ -8973,7 +8990,7 @@ mod windows_e2e_tests {
             fs::write(
                 &e2e_update_manifest_path,
                 format!(
-                    "VIBETIMER-UPDATE-1\nversion=9.9.9\ninstaller={update_source_url}\nsha256={update_digest}\n"
+                    "VIBEMACRO-UPDATE-1\nversion=9.9.9\ninstaller={update_source_url}\nsha256={update_digest}\n"
                 ),
             )
             .expect("manifest update E2E dibuat");
@@ -8985,7 +9002,8 @@ mod windows_e2e_tests {
                 .strip_prefix("//?/")
                 .unwrap_or(&update_feed_path);
             let update_feed_url = format!("file:///{update_feed_path}");
-            std::env::set_var("VIBETIMER_UPDATE_FEED_URL", update_feed_url);
+            std::env::set_var("VIBEMACRO_UPDATE_FEED_URL", update_feed_url);
+            TEST_UPDATE_LAUNCH_COUNT.store(0, Ordering::Release);
             state.settings.update_checks_enabled = false;
             handle_click(state, HitTarget::SettingUpdateChecks);
             assert!(state.settings.update_checks_enabled);
@@ -9015,11 +9033,15 @@ mod windows_e2e_tests {
                     .is_some_and(|path| path.exists()),
                 "installer dengan SHA-256 benar harus siap"
             );
-            handle_click(state, HitTarget::SettingCheckUpdate);
+            assert_eq!(
+                TEST_UPDATE_LAUNCH_COUNT.load(Ordering::Acquire),
+                1,
+                "satu klik update harus langsung membuka tahap instal setelah verifikasi"
+            );
             assert_eq!(state.settings_status_kind, StatusKind::Sent);
             handle_click(state, HitTarget::SettingUpdateChecks);
             assert!(!state.settings.update_checks_enabled);
-            std::env::remove_var("VIBETIMER_UPDATE_FEED_URL");
+            std::env::remove_var("VIBEMACRO_UPDATE_FEED_URL");
             handle_click(
                 state,
                 HitTarget::SettingEmergencyHotkey(EmergencyHotkey::CtrlShiftF12),
@@ -9044,7 +9066,7 @@ mod windows_e2e_tests {
             InvalidateRect(main_window, null(), FALSE);
             UpdateWindow(main_window);
             pump_messages_for(Duration::from_millis(120));
-            save_window_bmp(main_window, Path::new("qa/vibetimer-settings.bmp"))
+            save_window_bmp(main_window, Path::new("qa/vibemacro-settings.bmp"))
                 .expect("snapshot Settings dibuat");
             ShowWindow(main_window, SW_SHOWNORMAL);
             SendMessageW(main_window, WM_SIZE, SIZE_MINIMIZED, 0);
@@ -9078,12 +9100,12 @@ mod windows_e2e_tests {
             state.target = Some(TargetWindow {
                 window: target_window,
                 process_id: GetCurrentProcessId(),
-                title: "VibeTimer E2E Target".to_owned(),
-                executable: "VibeTimer-test.exe".to_owned(),
+                title: "Vibemacro E2E Target".to_owned(),
+                executable: "Vibemacro-test.exe".to_owned(),
             });
             assert_eq!(
                 state.target.as_ref().map(|target| target.title.as_str()),
-                Some("VibeTimer E2E Target")
+                Some("Vibemacro E2E Target")
             );
             assert!(
                 validate_target(state.target.as_ref().expect("target tersedia")).is_ok(),
@@ -9110,7 +9132,7 @@ mod windows_e2e_tests {
             InvalidateRect(main_window, null(), FALSE);
             UpdateWindow(main_window);
             pump_messages_for(Duration::from_millis(100));
-            save_window_bmp(main_window, Path::new("qa/vibetimer-running.bmp"))
+            save_window_bmp(main_window, Path::new("qa/vibemacro-running.bmp"))
                 .expect("snapshot aktif dibuat");
             state.running = false;
             state.status_kind = StatusKind::Ready;
@@ -9180,8 +9202,8 @@ mod windows_e2e_tests {
             state.target = Some(TargetWindow {
                 window: target_window,
                 process_id: GetCurrentProcessId(),
-                title: "VibeTimer E2E Target".to_owned(),
-                executable: "VibeTimer-test.exe".to_owned(),
+                title: "Vibemacro E2E Target".to_owned(),
+                executable: "Vibemacro-test.exe".to_owned(),
             });
             state.action_mode = ActionMode::EnterOnly;
             set_duration_fields(state, DurationFields::new(0, 0, 1));
@@ -9192,8 +9214,8 @@ mod windows_e2e_tests {
             state.target = Some(TargetWindow {
                 window: target_window,
                 process_id: GetCurrentProcessId(),
-                title: "VibeTimer E2E Target".to_owned(),
-                executable: "VibeTimer-test.exe".to_owned(),
+                title: "Vibemacro E2E Target".to_owned(),
+                executable: "Vibemacro-test.exe".to_owned(),
             });
             state.action_mode = ActionMode::EnterOnly;
             set_duration_fields(state, DurationFields::new(0, 0, 2));
@@ -9216,7 +9238,7 @@ mod windows_e2e_tests {
             InvalidateRect(main_window, null(), FALSE);
             UpdateWindow(main_window);
             pump_messages_for(Duration::from_millis(100));
-            save_window_bmp(main_window, Path::new("qa/vibetimer-multi-timer.bmp"))
+            save_window_bmp(main_window, Path::new("qa/vibemacro-multi-timer.bmp"))
                 .expect("snapshot Multi Timer dibuat");
             handle_click(state, HitTarget::TimerDuplicate);
             assert_eq!(state.timer_library.timers.len(), 3);
@@ -9300,7 +9322,7 @@ mod windows_e2e_tests {
             InvalidateRect(main_window, null(), FALSE);
             UpdateWindow(main_window);
             pump_messages_for(Duration::from_millis(120));
-            save_window_bmp(main_window, Path::new("qa/vibetimer-macro-empty.bmp"))
+            save_window_bmp(main_window, Path::new("qa/vibemacro-macro-empty.bmp"))
                 .expect("snapshot macro kosong dibuat");
             start_macro_recording(state);
             assert!(state.recording);
@@ -9474,7 +9496,7 @@ mod windows_e2e_tests {
             InvalidateRect(main_window, null(), FALSE);
             UpdateWindow(main_window);
             pump_messages_for(Duration::from_millis(150));
-            save_window_bmp(main_window, Path::new("qa/vibetimer-macro.bmp"))
+            save_window_bmp(main_window, Path::new("qa/vibemacro-macro.bmp"))
                 .expect("snapshot macro dibuat");
 
             let e2e_macro_path = PathBuf::from("qa/e2e-macros.vtm");
@@ -9728,13 +9750,13 @@ mod windows_e2e_tests {
                 "Sequence harus menjalankan On Press, While Holding, dan On Release"
             );
 
-            let background_title = "VibeTimer Background Target";
+            let background_title = "Vibemacro Background Target";
             let background_window = create_background_target(instance, background_title);
             assert_ne!(background_window, 0, "window target background dibuat");
             let other_window = CreateWindowExW(
                 0,
                 static_class.as_ptr(),
-                wide("VibeTimer Alt Tab Workspace").as_ptr(),
+                wide("Vibemacro Alt Tab Workspace").as_ptr(),
                 WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
@@ -9813,7 +9835,7 @@ mod windows_e2e_tests {
             InvalidateRect(main_window, null(), FALSE);
             UpdateWindow(main_window);
             pump_messages_for(Duration::from_millis(100));
-            save_window_bmp(main_window, Path::new("qa/vibetimer-macro-targeted.bmp"))
+            save_window_bmp(main_window, Path::new("qa/vibemacro-macro-targeted.bmp"))
                 .expect("snapshot target + editor delay dibuat");
 
             BACKGROUND_KEY_DOWNS.store(0, Ordering::Relaxed);
@@ -9927,8 +9949,8 @@ mod windows_e2e_tests {
                 let _ = fs::remove_file(path.with_extension("bak"));
             }
             let update_cache = PathBuf::from("qa/updates");
-            let _ = fs::remove_file(update_cache.join("VibeTimer-Setup-9.9.9.exe"));
-            let _ = fs::remove_file(update_cache.join("VibeTimer-Setup-9.9.9.download"));
+            let _ = fs::remove_file(update_cache.join("Vibemacro-Setup-9.9.9.exe"));
+            let _ = fs::remove_file(update_cache.join("Vibemacro-Setup-9.9.9.download"));
             let _ = fs::remove_file(update_cache.join("manifest.vtu.tmp"));
             let _ = fs::remove_dir(update_cache);
             DestroyWindow(target_window);

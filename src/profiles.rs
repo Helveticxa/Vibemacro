@@ -220,7 +220,7 @@ pub fn encode_profiles(library: &ProfileLibrary) -> io::Result<Vec<u8>> {
 pub fn decode_profiles(bytes: &[u8]) -> Result<ProfileLibrary, &'static str> {
     let mut reader = Reader::new(bytes);
     if reader.take(4)? != MAGIC {
-        return Err("File profil bukan format VibeTimer.");
+        return Err("File profil bukan format Vibemacro/VibeTimer.");
     }
     if reader.u16()? != VERSION {
         return Err("Versi profil belum didukung.");

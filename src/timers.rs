@@ -2,6 +2,8 @@ use crate::macro_engine::MacroTarget;
 use crate::settings::{read_with_backup_recovery, save_atomic};
 use std::io;
 use std::path::{Path, PathBuf};
+
+use crate::settings::data_directory;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(test)]
@@ -273,10 +275,7 @@ pub fn now_unix_ms() -> u64 {
 }
 
 pub fn default_timers_path() -> PathBuf {
-    let base = std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    base.join("VibeTimer").join("timers.vtt")
+    data_directory().join("timers.vtt")
 }
 
 pub fn encode_timers(library: &TimerLibrary) -> io::Result<Vec<u8>> {
