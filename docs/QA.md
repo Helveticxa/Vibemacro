@@ -89,5 +89,21 @@ bahwa software tidak mungkin memiliki kerentanan.
 
 ## GitHub Release live
 
-Belum diisi. Bagian ini hanya boleh diperbarui setelah CI, tag `v1.2.0`, Release,
-manifest latest, hash download anonim, checksum, dan Defender asset live lulus.
+- Repository: `Helveticxa/Vibemacro`, public, default branch `main`, lisensi MIT.
+- CI commit `7949911`: sukses pada run `31560478389`.
+- Workflow Release tag `v1.2.0`: sukses pada run `31560582389`.
+- Release `Vibemacro 1.2.0`: draft `false`, prerelease `false`.
+- Endpoint `/releases/latest/download/vibemacro-update.txt` mengembalikan versi
+  `1.2.0` dan URL installer versi-spesifik yang benar.
+
+| Asset publik | Ukuran | SHA-256 GitHub |
+|---|---:|---|
+| `Vibemacro-Setup-1.2.0-x64.exe` | 2.452.805 byte | `B5175FF02A0AFA753ACC2A84C5F367B2A51129C1A664F9D3E231B78A40D0AAE0` |
+| `Vibemacro-1.2.0-portable.exe` | 396.800 byte | `14663760B124E1C088E3FB84617F4B3428BDB2EC8801523644BB39122397F692` |
+| `vibemacro-update.txt` | 210 byte | `9052BB309C5570A7DAED55418E9ACAB39BABDE0806C85AD06B87C15079FFCE6E` |
+| `SHA256SUMS.txt` | 278 byte | `627D456F1D30D9488A33C8B081593ED9BEEEC551C2B9591062B208707BF729A0` |
+
+Installer diunduh ulang melalui URL dari manifest latest tanpa autentikasi.
+Hash aktual cocok dengan manifest dan seluruh entri `SHA256SUMS.txt`. Microsoft
+Defender scan pada keempat asset hasil download: exit 0, `found no threats`.
+Installer dan portable tetap `NotSigned`.
