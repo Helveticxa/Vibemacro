@@ -25,7 +25,7 @@ saat ini belum memiliki sertifikat Authenticode. Selalu unduh dari repository
 ini dan cocokkan SHA-256 dengan `SHA256SUMS.txt` pada release yang sama:
 
 ```powershell
-Get-FileHash .\Vibemacro-Setup-1.2.0-x64.exe -Algorithm SHA256
+Get-FileHash .\Vibemacro-Setup-1.3.0-x64.exe -Algorithm SHA256
 ```
 
 Versi portable `Vibemacro-<versi>-portable.exe` juga tersedia, tetapi installer
@@ -41,6 +41,8 @@ direkomendasikan agar upgrade, shortcut, dan uninstall berjalan konsisten.
 - Timeline editor untuk delay `0-60000 ms`, reorder, duplicate, insert, delete.
 - Trigger `F8`, `F9`, `Middle`, `Mouse 4`, dan `Mouse 5`.
 - Tiga scope output: **Global**, **App** background, dan **Game** focus-lock.
+- Scope **Global** mengunci diri ke aplikasi yang aktif saat trigger ditekan,
+  sehingga Alt+Tab tidak pernah membanjiri aplikasi lain dengan klik/ketikan.
 - Mode Game memakai keyboard scan code dan mouse input Windows agar lebih cocok
   untuk game yang mengabaikan pesan window biasa.
 - Exact-instance lock, auto-pause saat Alt+Tab, serta release/resume tombol dan
@@ -69,6 +71,12 @@ menjadi **Missed** dan tidak pernah mengetik diam-diam ketika Vibemacro dibuka.
 3. Tekan **Rekam input**, jalankan urutan input, lalu tekan `Esc`.
 4. Edit delay/urutan event dan tekan **Simpan**.
 
+Scope **Global** tidak lagi mengikuti fokus. Root window yang aktif ketika
+trigger ditekan menjadi anchor: input hanya dikirim selama aplikasi itu aktif,
+dan Alt+Tab melepas tombol/klik yang masih ditahan lalu mem-pause playback.
+Dengan begitu macro klik kiri/kanan tidak pernah membuat aplikasi lain tidak
+dapat dipakai.
+
 Gunakan **App** untuk aplikasi desktop Win32 yang menerima pesan keyboard/mouse
 di background. Gunakan **Game** untuk Roblox atau game yang membaca input lewat
 jalur perangkat: target harus menjadi foreground ketika menerima input. Saat
@@ -87,6 +95,26 @@ dan input stream tetap resource desktop bersama. Karena itu mode Game tidak
 berpura-pura menjalankan input di Roblox background. Vibemacro juga tidak
 memasang driver virtual, menginjeksi proses game, atau melewati anti-cheat.
 Periksa aturan game/experience sebelum menggunakan automation.
+
+### Kenapa macro game tidak bisa jalan sambil Alt+Tab
+
+Satu sesi Windows hanya punya satu *input desktop* dan satu foreground window.
+`SendInput` selalu masuk ke input desktop yang sedang aktif, jadi tidak ada cara
+mengarahkannya ke window tertentu di background.
+
+Menjalankan aplikasi pada desktop Win32 terpisah (`CreateDesktop`) juga tidak
+membantu: pada Windows 11 pengujian lokal menunjukkan `SendInput` dari thread
+yang di-attach ke desktop non-input mengembalikan `0` dengan
+`GetLastError() = 5` (`ERROR_ACCESS_DENIED`), dan `GetForegroundWindow()` pada
+desktop itu bernilai `0`. Tidak ada keyboard maupun mouse event yang sampai.
+
+Karena itu hanya ada dua jalur jujur:
+
+- Aplikasi yang menerima pesan window (kebanyakan app Win32) memakai scope
+  **App**; ini benar-benar berjalan di background sambil kamu Alt+Tab.
+- Game yang membaca Raw Input, termasuk Roblox, memerlukan foreground. Bila
+  komputer harus tetap dipakai untuk hal lain, jalankan game pada **sesi Windows
+  terpisah** (VM/PC kedua) yang punya input desktop sendiri.
 
 Emergency Stop default adalah `Ctrl + Alt + F12`. Jangan mengetik password atau
 data sensitif ketika recorder sedang aktif.

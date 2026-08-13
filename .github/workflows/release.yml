@@ -45,6 +45,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          $parsed = [version]$version
+          # Catatan rilis mengikuti versi, bukan path tetap, agar tag baru tidak
+          # pernah diam-diam mempublikasikan catatan rilis lama.
+          $notes = ".\docs\RELEASE-v$($parsed.Major).$($parsed.Minor).md"
+          if (-not (Test-Path $notes)) { throw "Catatan rilis $notes tidak ditemukan" }
           gh release create $env:GITHUB_REF_NAME `
             ".\dist\Vibemacro-Setup-$version-x64.exe" `
             ".\dist\Vibemacro-$version-portable.exe" `
@@ -53,4 +58,4 @@ jobs:
             --verify-tag `
             --latest `
             --title "Vibemacro $version" `
-            --notes-file ".\docs\RELEASE-v1.2.md"
+            --notes-file $notes

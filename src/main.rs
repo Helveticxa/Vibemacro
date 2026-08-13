@@ -2962,11 +2962,11 @@ unsafe fn draw_macro_interface_v3(dc: Hdc, state: &AppState) {
         draw_label(
             dc,
             if game_scoped {
-                "Alt+Tab: pause aman"
+                "Alt+Tab: pause"
             } else if background_scoped {
                 "Background Win32"
             } else {
-                "Mengikuti app aktif"
+                "Kunci app pemicu"
             },
             Rect::new(946, 288, 1080, 322),
             if window_scoped {
@@ -2975,7 +2975,9 @@ unsafe fn draw_macro_interface_v3(dc: Hdc, state: &AppState) {
                 COLOR_DIM
             },
             state.fonts.small,
-            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+            // Ellipsis wajib: rail ini hanya 134 px, tanpa flag ini teks yang
+            // sedikit terlalu panjang terpotong di tengah glyph.
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
         );
 
         draw_hairline(dc, 946, 334, 1080, COLOR_PANEL_BORDER);
@@ -5381,6 +5383,59 @@ unsafe fn resolve_playback_destination(
     })
 }
 
+/// Root window yang aktif saat trigger ditekan. Dipakai sebagai anchor scope
+/// Global agar `SendInput` tidak berpindah mengikuti fokus.
+///
+/// Window Vibemacro sendiri sengaja tidak dikecualikan. Mengembalikan `None`
+/// berarti kembali ke perilaku follow-focus lama yang justru membanjiri
+/// aplikasi berikutnya setelah Alt+Tab, jadi anchor selalu dipasang selama
+/// foreground dan PID-nya terbaca.
+unsafe fn foreground_anchor_target() -> Option<MacroPlaybackTarget> {
+    let foreground = unsafe { GetForegroundWindow() };
+    #[cfg(test)]
+    let foreground = if foreground == 0 {
+        unsafe { GetActiveWindow() }
+    } else {
+        foreground
+    };
+    if foreground == 0 {
+        return None;
+    }
+    let root = unsafe { GetAncestor(foreground, GA_ROOT) };
+    if root == 0 {
+        return None;
+    }
+    let mut process_id = 0;
+    unsafe { GetWindowThreadProcessId(root, &mut process_id) };
+    if process_id == 0 {
+        return None;
+    }
+    let title = unsafe { get_window_text(root) };
+    Some(MacroPlaybackTarget {
+        root,
+        receiver: root,
+        process_id,
+        title: if title.trim().is_empty() {
+            "app aktif".to_owned()
+        } else {
+            title
+        },
+    })
+}
+
+/// Scope Global tetap memakai `SendInput`, tetapi dikunci ke app yang aktif saat
+/// trigger. Tanpa kunci ini Alt+Tab membuat klik dan ketikan macro membanjiri
+/// aplikasi lain sehingga user tidak dapat memakai aplikasi itu sama sekali.
+unsafe fn lock_global_destination(destination: PlaybackDestination) -> PlaybackDestination {
+    match destination {
+        PlaybackDestination::Foreground => match unsafe { foreground_anchor_target() } {
+            Some(anchor) => PlaybackDestination::ForegroundExclusive(anchor),
+            None => PlaybackDestination::Foreground,
+        },
+        other => other,
+    }
+}
+
 unsafe fn read_number(window: Hwnd) -> u32 {
     unsafe { get_window_text(window).trim().parse::<u32>().unwrap_or(0) }
 }
@@ -5944,6 +5999,18 @@ unsafe fn post_background_event(
                 (MouseButton::X2, true) => (WM_XBUTTONDOWN, ((XBUTTON2 as usize) << 16) | 0x0040),
                 (MouseButton::X2, false) => (WM_XBUTTONUP, (XBUTTON2 as usize) << 16),
             };
+            // Banyak kontrol Win32 baru memproses klik setelah hover diperbarui.
+            // Mouse move dikirim lebih dulu, tetapi kegagalannya tidak fatal.
+            if down {
+                unsafe {
+                    PostMessageW(
+                        target.receiver,
+                        WM_MOUSEMOVE,
+                        0,
+                        point_lparam(point.x, point.y),
+                    )
+                };
+            }
             unsafe {
                 PostMessageW(
                     target.receiver,
@@ -7394,7 +7461,7 @@ unsafe fn handle_trigger_down(state: &mut AppState, item: MacroDefinition) {
         PlaybackDestination::Foreground
     } else {
         match unsafe { resolve_playback_destination(state, &item) } {
-            Ok(destination) => destination,
+            Ok(destination) => unsafe { lock_global_destination(destination) },
             Err(message) => {
                 state.trigger_down = false;
                 state.trigger_macro_id = None;
@@ -10369,6 +10436,25 @@ mod windows_e2e_tests {
                     .target
                     .is_none()
             );
+            SetForegroundWindow(other_window);
+            SetActiveWindow(other_window);
+            BringWindowToTop(other_window);
+            pump_messages_for(Duration::from_millis(60));
+            let global_item = state
+                .macro_library
+                .selected()
+                .expect("macro global tersedia")
+                .clone();
+            let resolved_global = resolve_playback_destination(state, &global_item)
+                .expect("scope Global tidak memerlukan target");
+            let global_destination = lock_global_destination(resolved_global);
+            match global_destination {
+                PlaybackDestination::ForegroundExclusive(anchor) => assert_eq!(
+                    anchor.root, other_window,
+                    "scope Global harus dikunci ke app yang aktif saat trigger"
+                ),
+                _ => panic!("scope Global wajib memakai anchor focus-lock, bukan follow-focus"),
+            }
             DestroyWindow(other_window);
 
             TEST_INPUT_TARGET.store(0, Ordering::Relaxed);

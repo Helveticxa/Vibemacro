@@ -1,20 +1,44 @@
-# Vibemacro 1.2.0 - QA Evidence
+# Vibemacro 1.3.0 - QA Evidence
 
-Tanggal verifikasi lokal: 2026-08-12.
+Tanggal verifikasi lokal: 2026-08-13.
 
 ## Root cause dan kontrak perbaikan
 
-Mode Window lama memakai `PostMessageW`. Jalur itu dapat mengisi chat/control
-Win32, tetapi game yang membaca Raw Input tidak wajib menganggapnya sebagai
-keyboard/mouse perangkat. Vibemacro 1.2 memisahkan dua target mode:
+Scope **Global** memakai `SendInput` tanpa target, sehingga playback mengikuti
+foreground window. Ketika pengguna Alt+Tab saat macro klik kiri/kanan berjalan,
+seluruh klik dan ketikan berpindah ke aplikasi berikutnya sampai aplikasi itu
+tidak dapat dipakai. Vibemacro 1.3 mengunci Global ke root window yang aktif
+ketika trigger ditekan:
 
-- **App**: pesan background untuk aplikasi Win32 yang mendukungnya.
-- **Game**: `SendInput` scan-code/mouse hanya ketika exact target instance menjadi
-  foreground. Alt+Tab me-release input held dan mem-pause playback.
+- Anchor diverifikasi ulang (HWND root + PID) sebelum setiap event dan setiap
+  slice delay, memakai jalur focus-lock yang sama dengan mode Game.
+- Saat anchor tidak aktif, semua key/button held dilepas satu kali lalu playback
+  pause; ketika anchor aktif lagi state held dipulihkan satu kali.
+- Anchor yang ditutup atau berganti proses menghentikan macro fail-safe.
+- Anchor sengaja tidak mengecualikan window Vibemacro sendiri. Mengembalikan
+  "tidak ada anchor" berarti kembali ke follow-focus, yaitu bug yang diperbaiki.
 
-Tidak ada driver virtual, process injection, atau anti-cheat bypass. Windows
-tidak menyediakan virtual mouse per-window melalui `SendInput`; karena itu input
-Game tidak berjalan di Roblox background dan tidak dialihkan ke app lain.
+Tidak ada setting baru, perubahan layout, atau perubahan format file macro.
+
+## Batas teknis yang diuji ulang
+
+Permintaan agar macro tetap mengklik game sementara pengguna bekerja di aplikasi
+lain tidak dapat dipenuhi dalam satu sesi Windows. Pendekatan desktop Win32
+terpisah diuji langsung pada Windows 11 dan gagal:
+
+| Langkah | Hasil |
+|---|---|
+| `CreateDesktop` + `CreateProcess` dengan `lpDesktop` | Berhasil, probe berjalan pada desktop non-input |
+| `EnumDesktopWindows` menemukan window probe | Ya, `visible=True` |
+| `SetThreadDesktop` dari thread pemanggil | Berhasil |
+| `GetForegroundWindow()` pada desktop itu | `0` |
+| `SendInput` keyboard | Mengembalikan `0`, `GetLastError() = 5` |
+| `SendInput` mouse | Mengembalikan `0`, `GetLastError() = 5` |
+| Event diterima probe | Tidak ada |
+
+Kesimpulan: `SendInput` hanya bekerja pada input desktop yang aktif. Background
+sejati hanya lewat pesan window (scope App) atau sesi Windows terpisah (VM/PC
+kedua). Tidak ada driver virtual, process injection, atau anti-cheat bypass.
 
 ## Gate kode dan test
 
@@ -24,86 +48,84 @@ Game tidak berjalan di Roblox background dan tidak dialihkan ke app lain.
 - 4 test binary/Windows: lulus, termasuk desktop E2E interaktif.
 - Total: 38/38.
 
-Test baru membuktikan:
+Test baru pada 1.3 membuktikan scope Global menghasilkan anchor
+`ForegroundExclusive` ke window yang aktif, bukan destinasi follow-focus.
 
-- format macro v3 menyimpan `ForegroundExclusive`;
-- file v2 dimigrasikan ke mode App background;
-- WASD Game memakai scan code, bukan hanya virtual-key message;
-- key/button held dideduplikasi, dilepas, dan dapat dilanjutkan tanpa stacking;
-- toggle Game tidak menambah event ketika target kehilangan foreground;
-- macro tidak berpindah ke window kedua setelah Alt+Tab;
-- target PID/HWND yang ditutup atau berubah berhenti fail-safe.
+Cakupan yang dipertahankan dari 1.2: format macro v3 menyimpan
+`ForegroundExclusive`; file v1/v2 dimigrasikan ke App background; WASD Game
+memakai scan code; key/button held dideduplikasi, dilepas, dan dilanjutkan tanpa
+stacking; toggle Game tidak menambah event ketika target kehilangan foreground;
+macro tidak berpindah ke window kedua setelah Alt+Tab; target PID/HWND yang
+ditutup atau berubah berhenti fail-safe.
 
-Actual Roblox account tidak dibuka atau diotomasi selama QA. Roblox/game dapat
-memiliki kebijakan dan filter input sendiri; smoke test user tetap diperlukan.
+Roblox nyata tidak dibuka atau diotomasi selama QA. Smoke test pengguna pada
+game/aplikasi masing-masing tetap diperlukan.
 
 ## Visual QA
 
-Snapshot `qa/vibemacro-game-scope.bmp` diperiksa pada resolusi asli. Scope
-Global/App/Game terbaca penuh, selection Game jelas, status
-`Alt+Tab: pause aman` tidak terpotong, dan timeline W + left click tetap rapi.
+Snapshot diperiksa pada resolusi asli dengan crop rail "Output macro".
 
-## Installer upgrade E2E
+Koreksi terhadap QA 1.2: dokumen 1.2 menyatakan status `Alt+Tab: pause aman`
+"tidak terpotong". Pemeriksaan ulang snapshot membuktikan klaim itu **salah** -
+teks terpotong di tengah glyph menjadi `Alt+Tab: pause amar` karena rail hanya
+selebar 134 px dan label digambar tanpa `DT_END_ELLIPSIS`.
 
-Fixture memakai QA AppId terpisah; instalasi produksi user tidak disentuh.
+Perbaikan pada 1.3:
 
-| Pemeriksaan | Hasil |
-|---|---|
-| Install fixture VibeTimer 1.0 | Lulus |
-| Upgrade ke Vibemacro 1.2.0 | Lulus |
-| EXE lama terhapus | Ya |
-| Display name/version | `Vibemacro 1.2.0` |
-| Single-instance | Exit code 0 |
-| Data legacy tersalin tepat | Ya |
-| Data legacy dipertahankan | Ya |
-| Uninstall menghapus app directory | Ya |
-| Uninstall mempertahankan user data | Ya |
-| Registrasi uninstall QA dibersihkan | Ya |
-| Registrasi produksi pengguna berubah | Tidak |
+- Label mode Game menjadi `Alt+Tab: pause`.
+- Label scope Global menjadi `Kunci app pemicu`.
+- Label hint scope kini memakai `DT_END_ELLIPSIS`, sehingga overflow di masa
+  depan menghasilkan elipsis, bukan potongan glyph.
+
+Snapshot `qa/vibemacro-macro.bmp` dan `qa/vibemacro-game-scope.bmp` diperiksa
+ulang setelah perbaikan: ketiga tombol scope terbaca penuh, selection terbaca,
+nama target memakai elipsis normal, dan kedua label hint utuh.
+
+## Smoke test binary rilis
+
+`target/release/Vibemacro.exe` dijalankan langsung: `Responding=True`, working
+set 26,59 MiB, 11 thread, 448 handle, lalu keluar bersih.
 
 ## Artefak lokal
 
 | File | Ukuran | SHA-256 |
 |---|---:|---|
-| `Vibemacro-Setup-1.2.0-x64.exe` | 2.444.655 byte | `851BE7340C7B092D92745821D607934210D8CF1BF252DD7862841F1E5EA3AB77` |
-| `Vibemacro-1.2.0-portable.exe` | 396.800 byte | `7385B6C3F26FD87B1AF66F73C7F91E1BA5BD3BBA6989443B211D7B174D450C0A` |
-| `vibemacro-update.txt` | 210 byte | `27D222B225D92CC7EAECCAA468D94EC768E438B76D1997225682C3F2854AD0FB` |
-| `SHA256SUMS.txt` | 278 byte | `9C0E236215BE6E0F14060B744DCA9F5A5E94AB2052281842C908B156AB89EF50` |
+| `Vibemacro-Setup-1.3.0-x64.exe` | 2.445.234 byte | `0165F0388D487A43801768EEDE78DE225106D29DD169C294134D4E4E766ED119` |
+| `Vibemacro-1.3.0-portable.exe` | 396.800 byte | `45D9DDEAE209FCB8B118DAD3706A38B8439B1F429C0DC7D7932DECE14CE8508D` |
+| `vibemacro-update.txt` | 210 byte | `FDE63D6C649EC2C7FB83E374957EB25F3A7BA67619244A42BE349F813FC359BB` |
+| `SHA256SUMS.txt` | 278 byte | `BF8069795841D725EC3CDEEED2B2BEDE6153C57B7E1B108AA348B6486DDD25A9` |
 
 Hash publik GitHub dapat berbeda karena workflow membangun ulang dari commit/tag
-yang sama pada Windows runner. Setelah release, hash asset live harus dicatat di
-bagian berikut dan dicocokkan dengan manifest/checksums yang diunduh anonim.
+yang sama pada Windows runner. Hash asset live dicatat di bagian berikut setelah
+release dan dicocokkan dengan manifest/checksums yang diunduh anonim.
 
 ## Security dan performance lokal
 
-- `tools/security-scan.ps1 -IncludeHistory`: lulus; kandidat file dan histori
+- `tools/security-scan.ps1 -IncludeHistory`: lulus; 33 tracked file dan histori
   Git dipindai tanpa mencetak nilai secret.
 - Microsoft Defender custom scan seluruh `dist/`: exit 0, `found no threats`.
-- Authenticode: installer dan portable `NotSigned`; SmartScreen masih mungkin.
-- Profil idle 8 detik setelah startup update check pada data QA terisolasi:
-  CPU 0,000% satu core, handle 404 -> 404, thread 11 -> 11, working set
-  21,59 MiB, private memory 3,66 MiB, responding.
+- Authenticode: installer dan portable `NotSigned`; SmartScreen masih mungkin
+  memperingatkan.
 
-Hasil scan bersifat scoped pada artefak dan pola saat ini, bukan jaminan universal
-bahwa software tidak mungkin memiliki kerentanan.
+Hasil scan bersifat scoped pada artefak dan pola saat ini, bukan jaminan
+universal bahwa software tidak mungkin memiliki kerentanan.
+
+## Catatan workflow release
+
+Job publish sebelumnya memakai path catatan rilis tetap `docs/RELEASE-v1.2.md`.
+Tag baru akan diam-diam mempublikasikan catatan rilis lama. Pada 1.3 path itu
+dihitung dari tag (`docs/RELEASE-v<major>.<minor>.md`) dan job gagal eksplisit
+bila file catatan tidak ada.
 
 ## GitHub Release live
 
-- Repository: `Helveticxa/Vibemacro`, public, default branch `main`, lisensi MIT.
+Diisi setelah workflow Release untuk tag `v1.3.0` selesai.
+
+### Riwayat 1.2.0
+
 - CI commit `7949911`: sukses pada run `31560478389`.
 - Workflow Release tag `v1.2.0`: sukses pada run `31560582389`.
-- Release `Vibemacro 1.2.0`: draft `false`, prerelease `false`.
-- Endpoint `/releases/latest/download/vibemacro-update.txt` mengembalikan versi
-  `1.2.0` dan URL installer versi-spesifik yang benar.
-
-| Asset publik | Ukuran | SHA-256 GitHub |
-|---|---:|---|
-| `Vibemacro-Setup-1.2.0-x64.exe` | 2.452.805 byte | `B5175FF02A0AFA753ACC2A84C5F367B2A51129C1A664F9D3E231B78A40D0AAE0` |
-| `Vibemacro-1.2.0-portable.exe` | 396.800 byte | `14663760B124E1C088E3FB84617F4B3428BDB2EC8801523644BB39122397F692` |
-| `vibemacro-update.txt` | 210 byte | `9052BB309C5570A7DAED55418E9ACAB39BABDE0806C85AD06B87C15079FFCE6E` |
-| `SHA256SUMS.txt` | 278 byte | `627D456F1D30D9488A33C8B081593ED9BEEEC551C2B9591062B208707BF729A0` |
-
-Installer diunduh ulang melalui URL dari manifest latest tanpa autentikasi.
-Hash aktual cocok dengan manifest dan seluruh entri `SHA256SUMS.txt`. Microsoft
-Defender scan pada keempat asset hasil download: exit 0, `found no threats`.
-Installer dan portable tetap `NotSigned`.
+- Installer live 2.452.805 byte, SHA-256
+  `B5175FF02A0AFA753ACC2A84C5F367B2A51129C1A664F9D3E231B78A40D0AAE0`.
+- Portable live 396.800 byte, SHA-256
+  `14663760B124E1C088E3FB84617F4B3428BDB2EC8801523644BB39122397F692`.
