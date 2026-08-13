@@ -119,7 +119,35 @@ bila file catatan tidak ada.
 
 ## GitHub Release live
 
-Diisi setelah workflow Release untuk tag `v1.3.0` selesai.
+- CI commit `b78df32`: sukses pada run `31689241205`.
+- Workflow Release tag `v1.3.0`: sukses pada run `31689255595`.
+- Release `Vibemacro 1.3.0`: draft `false`, prerelease `false`, ditandai latest.
+- Catatan rilis yang terbit berasal dari `docs/RELEASE-v1.3.md`, membuktikan
+  perbaikan path dinamis pada job publish bekerja.
+
+| Asset publik | Ukuran | SHA-256 GitHub |
+|---|---:|---|
+| `Vibemacro-Setup-1.3.0-x64.exe` | 2.453.420 byte | `9C3F96D224C1E1E42031B6278092EE08841CF43D1EA51DEE5F52FDACB5744961` |
+| `Vibemacro-1.3.0-portable.exe` | 396.800 byte | `BC917290F067A634B2CC36DEE05C926222C80DA37B0F15A260CC743E9F1D766E` |
+| `vibemacro-update.txt` | 210 byte | `96485C25587D3EBD8CF28ADA9CD33A2C3AF9C043954690A2ACD67F5A7A56AB07` |
+| `SHA256SUMS.txt` | 278 byte | `960857BD0CD0199BE053FCC2DEA6A6A5036C1440FD5E84F667022FA93E762E7C` |
+
+Hash lokal dan hash publik berbeda karena workflow membangun ulang installer
+dari tag yang sama pada Windows runner. Yang mengikat adalah manifest: manifest
+publik menunjuk hash installer publik.
+
+### Verifikasi jalur auto-update end-to-end
+
+Dilakukan anonim, persis seperti yang dilakukan aplikasi pengguna:
+
+1. `GET /releases/latest/download/vibemacro-update.txt` mengembalikan
+   `version=1.3.0` dan URL installer versi-spesifik untuk `v1.3.0`.
+2. Installer diunduh dari URL di dalam manifest itu, bukan dari URL lain.
+3. SHA-256 hasil unduhan cocok persis dengan `sha256=` pada manifest.
+4. Ketiga entri `SHA256SUMS.txt` cocok dengan hash aktual asset yang diunduh.
+5. Microsoft Defender custom scan pada seluruh asset hasil unduhan: exit 0,
+   `found no threats`.
+6. Installer publik tetap `NotSigned`; SmartScreen masih dapat memperingatkan.
 
 ### Riwayat 1.2.0
 
